@@ -14,7 +14,7 @@ crates/
   hush-server   Axum + SQLite relay: accounts, prekey bundles, encrypted
                 message queues, SSE delivery.
 apps/
-  desktop       Tauri 2 desktop app (planned).
+  desktop       Tauri 2 desktop app (vanilla TypeScript + Vite UI).
 ```
 
 - **Session establishment**: PQXDH (hybrid X25519 + ML-KEM/Kyber, FIPS 203).
@@ -30,7 +30,14 @@ it is not on `PATH`), Node.js (for the desktop app).
 ```sh
 cargo test --workspace   # unit + integration tests
 cargo run -p hush-server # relay on 127.0.0.1:8080 (HUSH_ADDR / HUSH_DB to override)
+
+cd apps/desktop
+npm install
+npm run tauri dev        # desktop app against the local relay
 ```
+
+To try a conversation locally, run the relay plus two instances of the app,
+register a different username in each, add the other user as contact and chat.
 
 ## License
 

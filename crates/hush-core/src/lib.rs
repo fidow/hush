@@ -1,6 +1,16 @@
 //! Hush core: protocol, crypto, and client logic shared across platforms.
+//!
+//! - [`engine::Engine`]: identity, PQXDH (X25519 + Kyber-1024) session
+//!   establishment and Double Ratchet messaging via libsignal.
+//! - [`api::ApiClient`]: HTTP client for the Hush relay server.
 
-pub use libsignal_protocol;
+pub mod api;
+pub mod client;
+pub mod engine;
+
+pub use api::{ApiClient, IncomingMessage};
+pub use client::{DecryptedMessage, HushClient};
+pub use engine::Engine;
 
 #[cfg(test)]
 mod tests {

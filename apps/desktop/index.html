@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Hush</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+
+  <body>
+    <!-- Login -->
+    <section id="login" class="screen">
+      <form id="login-form" class="login-card">
+        <h1>Hush</h1>
+        <p class="tagline">Mensajería privada con cifrado post-cuántico</p>
+        <label>
+          Servidor
+          <input id="server-input" value="http://127.0.0.1:8080" required />
+        </label>
+        <label>
+          Nombre de usuario
+          <input id="username-input" placeholder="ej. alice" pattern="[A-Za-z0-9_]{1,32}" required autofocus />
+        </label>
+        <button type="submit" id="login-btn">Crear cuenta y entrar</button>
+        <p id="login-error" class="error"></p>
+      </form>
+    </section>
+
+    <!-- Chat -->
+    <section id="chat" class="screen hidden">
+      <aside class="sidebar">
+        <header class="me">
+          <span class="dot"></span>
+          <span id="me-name"></span>
+        </header>
+        <form id="add-contact-form">
+          <input id="add-contact-input" placeholder="añadir contacto…" pattern="[A-Za-z0-9_]{1,32}" />
+        </form>
+        <ul id="contact-list"></ul>
+      </aside>
+      <main class="conversation">
+        <header id="conv-header">Selecciona un contacto</header>
+        <div id="messages"></div>
+        <form id="send-form">
+          <input id="send-input" placeholder="Escribe un mensaje cifrado…" autocomplete="off" disabled />
+          <button type="submit" id="send-btn" disabled>Enviar</button>
+        </form>
+      </main>
+    </section>
+
+    <div id="toast" class="hidden"></div>
+  </body>
+</html>
