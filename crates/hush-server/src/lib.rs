@@ -1371,6 +1371,16 @@ async fn message_stream(
     auth: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    // Opening streams is cheap per request but expensive in aggregate; a
+    // client stuck in a reconnect loop must not be able to spin here.
+    if !state
+        .limits
+        .allow(&format!("stream:{}", auth.username), 30, MINUTE, now())
+    {
+        tracing::warn!(user = %auth.username, "demasiadas reconexiones, stream rechazado");
+        return Err(too_many());
+    }
+
     let (tx, rx) = mpsc::channel::<Push>(256);
     let listener_id = state.next_listener_id.fetch_add(1, Ordering::Relaxed);
     state.live.lock().await.insert(

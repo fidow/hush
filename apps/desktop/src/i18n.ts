@@ -93,6 +93,10 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "settings.save": "Guardar",
     "settings.close": "Cerrar",
     "settings.saved": "Ajustes guardados",
+    "settings.theme": "Apariencia",
+    "theme.system": "Como el sistema",
+    "theme.dark": "Oscura",
+    "theme.light": "Clara",
     "settings.notifications": "Mostrar notificaciones",
     "settings.sound": "Sonido de aviso",
 
@@ -267,6 +271,10 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "settings.save": "Save",
     "settings.close": "Close",
     "settings.saved": "Settings saved",
+    "settings.theme": "Appearance",
+    "theme.system": "Match system",
+    "theme.dark": "Dark",
+    "theme.light": "Light",
     "settings.notifications": "Show notifications",
     "settings.sound": "Alert sound",
 

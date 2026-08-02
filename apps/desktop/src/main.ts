@@ -455,31 +455,59 @@ function renderMyStatus() {
 
 // ---- Conexión ----
 
+const MIN_RECONNECT_MS = 1000;
+const MAX_RECONNECT_MS = 30_000;
+/// A connection has to survive this long before it counts as healthy.
+const STABLE_CONNECTION_MS = 30_000;
+
 let reconnectTimer: number | null = null;
-let reconnectDelay = 2000;
+let reconnectDelay = MIN_RECONNECT_MS;
+let connecting = false;
+let connectedAt = 0;
 
 function setOffline(offline: boolean) {
   $("#conn-banner").classList.toggle("hidden", !offline);
 }
 
-/// Opens the stream, retrying with backoff while the server is unreachable.
-/// A signed-in user stays in the app meanwhile, reading cached conversations.
-async function connectWithRetry() {
-  if (reconnectTimer !== null) {
-    clearTimeout(reconnectTimer);
+/// Schedules a reconnection. Never immediate and never concurrent: a stream
+/// that dies as soon as it opens would otherwise spin as fast as the network
+/// allows, hammering the server hundreds of times a second.
+function scheduleReconnect() {
+  if (reconnectTimer !== null || connecting) return;
+  reconnectTimer = window.setTimeout(() => {
     reconnectTimer = null;
-  }
+    void connectWithRetry();
+  }, reconnectDelay);
+  reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_MS);
+}
+
+/// Opens the stream. A signed-in user stays in the app while it is down,
+/// reading cached conversations.
+async function connectWithRetry() {
+  if (connecting) return;
+  connecting = true;
   try {
     await invoke("connect");
+    connectedAt = Date.now();
     setOffline(false);
-    reconnectDelay = 2000;
     await refreshContacts();
   } catch {
     setOffline(true);
-    reconnectTimer = window.setTimeout(connectWithRetry, reconnectDelay);
-    // Back off up to half a minute so a long outage isn't a busy loop.
-    reconnectDelay = Math.min(reconnectDelay * 2, 30_000);
+    scheduleReconnect();
+  } finally {
+    connecting = false;
   }
+}
+
+/// Called when the stream drops. The backoff only resets after a connection
+/// that actually lasted, so a flapping server is backed off just like an
+/// unreachable one.
+function onDisconnected() {
+  setOffline(true);
+  if (Date.now() - connectedAt > STABLE_CONNECTION_MS) {
+    reconnectDelay = MIN_RECONNECT_MS;
+  }
+  scheduleReconnect();
 }
 
 async function enterChat(profile: ProfileInfo) {
@@ -500,8 +528,10 @@ async function enterChat(profile: ProfileInfo) {
 }
 
 async function boot() {
+  applyTheme(currentTheme());
   populateServers();
   populateLanguages();
+  populateThemes();
   populateStatuses();
   applyTranslations();
   try {
@@ -538,6 +568,40 @@ function populateServers() {
   }
 }
 
+// ---- Tema claro / oscuro ----
+
+const THEME_KEY = "hush-theme";
+const THEMES = ["system", "dark", "light"] as const;
+type Theme = (typeof THEMES)[number];
+
+function currentTheme(): Theme {
+  const stored = localStorage.getItem(THEME_KEY);
+  return THEMES.includes(stored as Theme) ? (stored as Theme) : "system";
+}
+
+/// The stylesheet keys off this attribute; "system" lets the media query in
+/// the CSS follow whatever Windows is set to.
+function applyTheme(theme: Theme) {
+  localStorage.setItem(THEME_KEY, theme);
+  document.documentElement.dataset.theme = theme;
+}
+
+function populateThemes() {
+  const select = $("#settings-theme") as HTMLSelectElement;
+  select.replaceChildren();
+  for (const theme of THEMES) {
+    const option = document.createElement("option");
+    option.value = theme;
+    option.textContent = t(`theme.${theme}`);
+    select.appendChild(option);
+  }
+  select.value = currentTheme();
+}
+
+$("#settings-theme").addEventListener("change", (e) =>
+  applyTheme((e.target as HTMLSelectElement).value as Theme),
+);
+
 function populateLanguages() {
   for (const id of ["#lang-input", "#settings-lang"]) {
     const select = $(id) as HTMLSelectElement;
@@ -568,6 +632,7 @@ function refreshLanguage(next: Lang) {
   setLang(next);
   applyTranslations();
   populateStatuses();
+  populateThemes();
   ($("#settings-status") as HTMLSelectElement).value = myStatus;
   for (const id of ["#lang-input", "#settings-lang"]) {
     ($(id) as HTMLSelectElement).value = next;
@@ -585,6 +650,29 @@ $("#settings-lang").addEventListener("change", (e) =>
 );
 
 // ---- Ajustes ----
+
+// Quick status switcher: clicking your own name opens the picker, so the
+// most frequent change doesn't need a trip through settings.
+$("#me-status-btn").addEventListener("click", (e) => {
+  e.stopPropagation();
+  const button = $("#me-status-btn");
+  const rect = button.getBoundingClientRect();
+  showContextMenu(
+    SETTABLE_STATUSES.map((status) => ({
+      label: t(`status.${status}`),
+      dot: status,
+      checked: status === myStatus,
+      action: () => {
+        // Choosing by hand ends any automatic absence.
+        autoAway = false;
+        lastActivity = Date.now();
+        void applyStatus(status);
+      },
+    })),
+    rect.left,
+    rect.bottom + 4,
+  );
+});
 
 $("#settings-btn").addEventListener("click", () => {
   ($("#settings-alias") as HTMLInputElement).value = myAlias;
@@ -962,7 +1050,7 @@ listen("hush://contacts", async () => {
 });
 listen("hush://disconnected", () => {
   toast(t("error.disconnected"));
-  void connectWithRetry();
+  onDisconnected();
 });
 
 // ---- Pegar imágenes ----
@@ -1182,6 +1270,9 @@ document.addEventListener("keydown", (e) => {
 interface CtxItem {
   label: string;
   action: () => void;
+  /// Optional coloured dot, used by the status picker.
+  dot?: string;
+  checked?: boolean;
 }
 
 function closeContextMenu() {
@@ -1196,7 +1287,18 @@ function showContextMenu(items: CtxItem[], x: number, y: number) {
   for (const item of items) {
     const btn = document.createElement("button");
     btn.type = "button";
-    btn.textContent = item.label;
+    if (item.dot) {
+      const dot = document.createElement("span");
+      dot.className = `dot status-${item.dot}`;
+      btn.appendChild(dot);
+    }
+    btn.appendChild(document.createTextNode(item.label));
+    if (item.checked) {
+      const tick = document.createElement("span");
+      tick.className = "ctx-check";
+      tick.textContent = "✓";
+      btn.appendChild(tick);
+    }
     btn.addEventListener("click", () => {
       closeContextMenu();
       item.action();

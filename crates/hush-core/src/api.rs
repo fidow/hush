@@ -381,7 +381,19 @@ impl ApiClient {
         tokio::spawn(async move {
             let mut stream = res.bytes_stream();
             let mut buf = String::new();
-            while let Some(Ok(chunk)) = stream.next().await {
+            // Logged on exit: knowing whether the body ended cleanly or the
+            // read failed is the difference between a normal disconnect and a
+            // reconnect loop.
+            let mut reason = "body ended";
+            while let Some(chunk) = stream.next().await {
+                let chunk = match chunk {
+                    Ok(chunk) => chunk,
+                    Err(e) => {
+                        reason = "read error";
+                        tracing::warn!("event stream read failed: {e}");
+                        break;
+                    }
+                };
                 buf.push_str(&String::from_utf8_lossy(&chunk));
                 while let Some(end) = buf.find("\n\n") {
                     let frame: String = buf[..end].to_string();
@@ -410,11 +422,13 @@ impl ApiClient {
                     };
                     if let Some(event) = event {
                         if tx.send(event).await.is_err() {
+                            // The receiver is gone: a newer stream replaced us.
                             return;
                         }
                     }
                 }
             }
+            tracing::info!("event stream closed ({reason})");
         });
         Ok(rx)
     }

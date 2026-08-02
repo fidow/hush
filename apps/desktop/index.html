@@ -127,11 +127,14 @@
     <section id="chat" class="screen hidden">
       <aside class="sidebar">
         <header class="me">
-          <span id="me-dot" class="dot status-online"></span>
-          <div class="me-names">
-            <span id="me-alias"></span>
-            <small id="me-name"></small>
-          </div>
+          <button type="button" id="me-status-btn" class="me-status" data-i18n-title="settings.status">
+            <span id="me-dot" class="dot status-online"></span>
+            <div class="me-names">
+              <span id="me-alias"></span>
+              <small id="me-name"></small>
+            </div>
+            <span class="chevron">▾</span>
+          </button>
           <button type="button" id="settings-btn" class="icon-btn" data-i18n-title="chat.settings">⚙</button>
         </header>
         <form id="add-contact-form">
@@ -173,6 +176,10 @@
         <label>
           <span data-i18n="settings.language"></span>
           <select id="settings-lang"></select>
+        </label>
+        <label>
+          <span data-i18n="settings.theme"></span>
+          <select id="settings-theme"></select>
         </label>
         <label class="toggle">
           <input type="checkbox" id="settings-notifications" />
