@@ -1,0 +1,3 @@
+# The server crate is only a dev-dependency of hush-core, but it lands in the
+# watch graph and restarts the app on every server edit.
+/../../../crates/hush-server

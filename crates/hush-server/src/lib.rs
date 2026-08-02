@@ -876,6 +876,10 @@ async fn update_me(
         tracing::debug!(user = %auth.username, %status, "presencia actualizada");
     }
 
+    if req.alias.is_some() || req.status.is_some() {
+        notify_watchers(&state.db, &state.live, &auth.username).await;
+    }
+
     let row = sqlx::query("SELECT alias, status FROM accounts WHERE username = ?")
         .bind(&auth.username)
         .fetch_one(&state.db)
@@ -892,6 +896,24 @@ async fn update_me(
 async fn notify_contacts_changed(state: &AppState, username: &str) {
     if let Some(listener) = state.live.lock().await.get(username) {
         let _ = listener.tx.try_send(Push::ContactsChanged);
+    }
+}
+
+/// Nudges everyone who has `username` as an accepted contact. Used whenever
+/// something they can see changes — presence, display name, connecting or
+/// disconnecting — so their list updates at once instead of at the next poll.
+async fn notify_watchers(db: &SqlitePool, live: &LiveMap, username: &str) {
+    let peers = sqlx::query("SELECT peer FROM contacts WHERE owner = ? AND state = 'accepted'")
+        .bind(username)
+        .fetch_all(db)
+        .await
+        .unwrap_or_default();
+    let map = live.lock().await;
+    for row in peers {
+        let peer: String = row.get(0);
+        if let Some(listener) = map.get(&peer) {
+            let _ = listener.tx.try_send(Push::ContactsChanged);
+        }
     }
 }
 
@@ -1329,9 +1351,12 @@ async fn message_stream(
     // senders alive for streams that are long gone.
     let cleanup = LiveGuard {
         live: state.live.clone(),
+        db: state.db.clone(),
         username: auth.username.clone(),
         id: listener_id,
     };
+    // Coming online is a presence change for everyone watching.
+    notify_watchers(&state.db, &state.live, &auth.username).await;
 
     // Backlog first, then live pushes. Clients dedupe by message id: a message
     // arriving during the backlog query can be delivered twice.
@@ -1374,18 +1399,28 @@ async fn message_stream(
 /// unless a newer connection for the same account has replaced it.
 struct LiveGuard {
     live: LiveMap,
+    db: SqlitePool,
     username: String,
     id: u64,
 }
 
 impl Drop for LiveGuard {
     fn drop(&mut self) {
-        let (live, username, id) = (self.live.clone(), self.username.clone(), self.id);
+        let (live, db, username, id) =
+            (self.live.clone(), self.db.clone(), self.username.clone(), self.id);
         tokio::spawn(async move {
-            let mut map = live.lock().await;
-            if map.get(&username).is_some_and(|l| l.id == id) {
-                map.remove(&username);
-                tracing::debug!(user = %username, "stream SSE cerrado");
+            let removed = {
+                let mut map = live.lock().await;
+                let mine = map.get(&username).is_some_and(|l| l.id == id);
+                if mine {
+                    map.remove(&username);
+                    tracing::debug!(user = %username, "stream SSE cerrado");
+                }
+                mine
+            };
+            // Going offline is a presence change too.
+            if removed {
+                notify_watchers(&db, &live, &username).await;
             }
         });
     }

@@ -130,6 +130,7 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "ctx.copyFailed": "No se pudo copiar",
     "ctx.pasteFailed": "No se pudo pegar",
 
+    "conn.offline": "Sin conexión con el servidor · reintentando…",
     "error.disconnected": "Conexión con el servidor perdida",
     "error.sendFailed": "No se pudo enviar el mensaje",
     "error.imageFailed": "No se pudo enviar la imagen",
@@ -291,6 +292,7 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "ctx.copyFailed": "Could not copy",
     "ctx.pasteFailed": "Could not paste",
 
+    "conn.offline": "No connection to the server · retrying…",
     "error.disconnected": "Lost connection to the server",
     "error.sendFailed": "Could not send the message",
     "error.imageFailed": "Could not send the image",

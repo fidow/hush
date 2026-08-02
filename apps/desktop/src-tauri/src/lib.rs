@@ -2,6 +2,9 @@
 //! hush-core engine actor; the webview only ever sees the local user's own
 //! plaintext.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
 use hush_core::{ClientEvent, ContactEntry, HushClient, ProfileInfo, StoredMessage};
 use tauri::{Emitter, Manager, State};
 
@@ -86,8 +89,17 @@ async fn restore_history(client: State<'_, HushClient>, code: String) -> Result<
 /// Opens the message stream; incoming messages arrive as `hush://message`
 /// events until disconnect (`hush://disconnected`).
 #[tauri::command]
-async fn connect(app: tauri::AppHandle, client: State<'_, HushClient>) -> Result<(), String> {
+async fn connect(
+    app: tauri::AppHandle,
+    client: State<'_, HushClient>,
+    generation: State<'_, Arc<AtomicU64>>,
+) -> Result<(), String> {
     let mut rx = client.connect().await?;
+    // Reconnecting replaces the event channel, which ends the previous task.
+    // Only the newest one may report a disconnection, or a reconnect would
+    // look like a fresh drop and restart the cycle.
+    let generation = generation.inner().clone();
+    let mine = generation.fetch_add(1, Ordering::SeqCst) + 1;
     tauri::async_runtime::spawn(async move {
         while let Some(event) = rx.recv().await {
             match event {
@@ -108,7 +120,9 @@ async fn connect(app: tauri::AppHandle, client: State<'_, HushClient>) -> Result
                 }
             }
         }
-        let _ = app.emit("hush://disconnected", ());
+        if generation.load(Ordering::SeqCst) == mine {
+            let _ = app.emit("hush://disconnected", ());
+        }
     });
     Ok(())
 }
@@ -128,9 +142,10 @@ async fn send_message(
 async fn send_image(
     client: State<'_, HushClient>,
     recipient: String,
-    dataUrl: String,
+    // Tauri maps the JS `dataUrl` argument onto this snake_case name.
+    data_url: String,
 ) -> Result<StoredMessage, String> {
-    client.send_image(&recipient, &dataUrl).await
+    client.send_image(&recipient, &data_url).await
 }
 
 /// Sends a contact request; returns the resulting state.
@@ -203,6 +218,7 @@ pub fn run() {
                 _ => "hush.db".to_string(),
             };
             app.manage(HushClient::spawn(dir.join(file)));
+            app.manage(Arc::new(AtomicU64::new(0)));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

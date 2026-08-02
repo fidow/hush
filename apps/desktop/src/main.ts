@@ -60,7 +60,9 @@ const SERVERS: { name: string; url: string }[] = [
 ];
 
 const SETTABLE_STATUSES = ["online", "away", "busy"] as const;
-const PRESENCE_POLL_MS = 20_000;
+/// Presence and contact changes arrive pushed over the stream; this poll is
+/// only a safety net for a push that got lost.
+const PRESENCE_POLL_MS = 60_000;
 
 const contacts = new Map<string, Contact>();
 /// Contacts with messages arrived while their chat was not open.
@@ -212,7 +214,8 @@ async function refreshContacts() {
     renderContactList();
     if (current) updateHeader();
   } catch (err) {
-    toast(tError(err));
+    // Offline: keep showing whatever the cache holds instead of emptying it.
+    if (String(err) !== "connection_failed") toast(tError(err));
   }
 }
 
@@ -325,6 +328,35 @@ function renderMyStatus() {
 
 // ---- Sesión ----
 
+// ---- Conexión ----
+
+let reconnectTimer: number | null = null;
+let reconnectDelay = 2000;
+
+function setOffline(offline: boolean) {
+  $("#conn-banner").classList.toggle("hidden", !offline);
+}
+
+/// Opens the stream, retrying with backoff while the server is unreachable.
+/// A signed-in user stays in the app meanwhile, reading cached conversations.
+async function connectWithRetry() {
+  if (reconnectTimer !== null) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  try {
+    await invoke("connect");
+    setOffline(false);
+    reconnectDelay = 2000;
+    await refreshContacts();
+  } catch {
+    setOffline(true);
+    reconnectTimer = window.setTimeout(connectWithRetry, reconnectDelay);
+    // Back off up to half a minute so a long outage isn't a busy loop.
+    reconnectDelay = Math.min(reconnectDelay * 2, 30_000);
+  }
+}
+
 async function enterChat(profile: ProfileInfo) {
   me = profile.username;
   myAlias = profile.alias || me;
@@ -332,15 +364,11 @@ async function enterChat(profile: ProfileInfo) {
   $("#me-alias").textContent = myAlias;
   $("#me-name").textContent = `@${me}`;
   renderMyStatus();
-  try {
-    await invoke("connect");
-  } catch (e) {
-    show("login");
-    toast(tError(e));
-    return;
-  }
+  // Show the chat first: being unable to reach the server is not a reason to
+  // ask a signed-in user to log in again.
   await refreshContacts();
   show("chat");
+  await connectWithRetry();
   // Presence and request states come with the contact list.
   setInterval(refreshContacts, PRESENCE_POLL_MS);
 }
@@ -775,7 +803,10 @@ listen("hush://contacts", async () => {
     }
   }
 });
-listen("hush://disconnected", () => toast(t("error.disconnected")));
+listen("hush://disconnected", () => {
+  toast(t("error.disconnected"));
+  void connectWithRetry();
+});
 
 // ---- Pegar imágenes ----
 
