@@ -10,9 +10,24 @@ interface Message {
   mine: boolean;
 }
 
+interface StoredMessage {
+  id: string;
+  contact: string;
+  mine: boolean;
+  text: string;
+  created_at: number;
+}
+
+interface ProfileInfo {
+  username: string;
+  alias: string;
+  server: string;
+}
+
 interface Contact {
   alias: string;
   messages: Message[];
+  loaded: boolean;
 }
 
 const contacts = new Map<string, Contact>();
@@ -28,6 +43,14 @@ function toast(text: string) {
   el.classList.remove("hidden");
   setTimeout(() => el.classList.add("hidden"), 4000);
 }
+
+function show(screen: "boot" | "login" | "verify" | "chat") {
+  for (const s of ["boot", "login", "verify", "chat"]) {
+    $(`#${s}`).classList.toggle("hidden", s !== screen);
+  }
+}
+
+// ---- Contactos ----
 
 function contactLabel(name: string): string {
   const alias = contacts.get(name)?.alias;
@@ -54,15 +77,14 @@ function ensureContact(name: string, alias?: string) {
     }
     return;
   }
-  contacts.set(name, { alias: alias ?? name, messages: [] });
+  contacts.set(name, { alias: alias ?? name, messages: [], loaded: false });
   const li = document.createElement("li");
   li.dataset.name = name;
   li.addEventListener("click", () => selectContact(name));
   $("#contact-list").appendChild(li);
   renderContactItem(name);
   if (!alias) {
-    // Resolve the alias in the background (e.g. contact added by incoming message).
-    invoke<string>("get_profile", { username: name })
+    invoke<string>("add_contact", { username: name })
       .then((a) => ensureContact(name, a || name))
       .catch(() => {});
   }
@@ -73,18 +95,37 @@ function updateHeader() {
   $("#conv-header").textContent = `🔒 ${contactLabel(current)} · @${current}`;
 }
 
-function selectContact(name: string) {
+async function selectContact(name: string) {
   current = name;
-  document
-    .querySelectorAll("#contact-list li")
-    .forEach((li) => {
-      li.classList.toggle("active", (li as HTMLElement).dataset.name === name);
-      if ((li as HTMLElement).dataset.name === name) li.classList.remove("unread");
-    });
+  document.querySelectorAll("#contact-list li").forEach((li) => {
+    li.classList.toggle("active", (li as HTMLElement).dataset.name === name);
+    if ((li as HTMLElement).dataset.name === name) li.classList.remove("unread");
+  });
   updateHeader();
   ($("#send-input") as HTMLInputElement).disabled = false;
   ($("#send-btn") as HTMLButtonElement).disabled = false;
   ($("#emoji-btn") as HTMLButtonElement).disabled = false;
+
+  const contact = contacts.get(name)!;
+  if (!contact.loaded) {
+    try {
+      const hist = await invoke<StoredMessage[]>("get_history", { contact: name });
+      const restored: Message[] = hist.map((m) => ({
+        id: m.id,
+        sender: m.mine ? me : m.contact,
+        text: m.text,
+        created_at: m.created_at,
+        mine: m.mine,
+      }));
+      // Live messages may have arrived while loading; merge without dupes.
+      const seen = new Set(restored.map((m) => m.id));
+      for (const m of contact.messages) if (!seen.has(m.id)) restored.push(m);
+      contact.messages = restored;
+      contact.loaded = true;
+    } catch (err) {
+      toast(`No se pudo cargar el historial: ${err}`);
+    }
+  }
   renderMessages();
   $("#send-input").focus();
 }
@@ -115,7 +156,53 @@ function addMessage(contact: string, msg: Message) {
   }
 }
 
-// ---- Registro y verificación ----
+// ---- Sesión ----
+
+async function enterChat(profile: ProfileInfo) {
+  me = profile.username;
+  myAlias = profile.alias || me;
+  $("#me-alias").textContent = myAlias;
+  $("#me-name").textContent = `@${me}`;
+  try {
+    await invoke("connect");
+  } catch (err) {
+    show("login");
+    toast(`No se pudo conectar: ${err}`);
+    return;
+  }
+  try {
+    const list = await invoke<[string, string][]>("get_contacts");
+    for (const [username, alias] of list) ensureContact(username, alias);
+  } catch {
+    /* sin contactos aún */
+  }
+  show("chat");
+}
+
+async function boot() {
+  try {
+    const profile = await invoke<ProfileInfo | null>("load_profile");
+    if (profile) {
+      await enterChat(profile);
+      return;
+    }
+  } catch (err) {
+    toast(String(err));
+  }
+  show("login");
+}
+
+// ---- Pestañas registro / entrar ----
+
+function setAuthTab(register: boolean) {
+  $("#tab-register").classList.toggle("active", register);
+  $("#tab-signin").classList.toggle("active", !register);
+  $("#login-form").classList.toggle("hidden", !register);
+  $("#signin-form").classList.toggle("hidden", register);
+}
+
+$("#tab-register").addEventListener("click", () => setAuthTab(true));
+$("#tab-signin").addEventListener("click", () => setAuthTab(false));
 
 $("#login-form").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -132,8 +219,7 @@ $("#login-form").addEventListener("submit", async (e) => {
     });
     me = ($("#username-input") as HTMLInputElement).value.trim();
     myAlias = ($("#alias-input") as HTMLInputElement).value.trim() || me;
-    $("#login").classList.add("hidden");
-    $("#verify").classList.remove("hidden");
+    show("verify");
     if (devCode) ($("#code-input") as HTMLInputElement).value = devCode;
     $("#code-input").focus();
   } catch (err) {
@@ -152,10 +238,11 @@ $("#verify-form").addEventListener("submit", async (e) => {
     await invoke("verify", {
       code: ($("#code-input") as HTMLInputElement).value.trim(),
     });
-    $("#me-alias").textContent = myAlias;
-    $("#me-name").textContent = `@${me}`;
-    $("#verify").classList.add("hidden");
-    $("#chat").classList.remove("hidden");
+    await enterChat({
+      username: me,
+      alias: myAlias,
+      server: ($("#server-input") as HTMLInputElement).value.trim(),
+    });
   } catch (err) {
     $("#verify-error").textContent = String(err);
   } finally {
@@ -163,7 +250,26 @@ $("#verify-form").addEventListener("submit", async (e) => {
   }
 });
 
-// ---- Contactos y mensajes ----
+$("#signin-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const btn = $("#signin-btn") as HTMLButtonElement;
+  btn.disabled = true;
+  $("#signin-error").textContent = "";
+  try {
+    const profile = await invoke<ProfileInfo>("login", {
+      server: ($("#signin-server-input") as HTMLInputElement).value.trim(),
+      username: ($("#signin-username-input") as HTMLInputElement).value.trim(),
+      password: ($("#signin-password-input") as HTMLInputElement).value,
+    });
+    await enterChat(profile);
+  } catch (err) {
+    $("#signin-error").textContent = String(err);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// ---- Contactos y envío ----
 
 $("#add-contact-form").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -172,7 +278,7 @@ $("#add-contact-form").addEventListener("submit", async (e) => {
   input.value = "";
   if (!name || name === me) return;
   try {
-    const alias = await invoke<string>("get_profile", { username: name });
+    const alias = await invoke<string>("add_contact", { username: name });
     ensureContact(name, alias || name);
     selectContact(name);
   } catch (err) {
@@ -189,12 +295,12 @@ $("#send-form").addEventListener("submit", async (e) => {
   input.value = "";
   hideEmojiPanel();
   try {
-    await invoke("send_message", { recipient, text });
+    const stored = await invoke<StoredMessage>("send_message", { recipient, text });
     addMessage(recipient, {
-      id: crypto.randomUUID(),
+      id: stored.id,
       sender: me,
-      text,
-      created_at: Date.now(),
+      text: stored.text,
+      created_at: stored.created_at,
       mine: true,
     });
   } catch (err) {
@@ -300,3 +406,5 @@ $("#emoji-btn").addEventListener("click", () => {
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") hideEmojiPanel();
 });
+
+boot();

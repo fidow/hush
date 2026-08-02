@@ -9,34 +9,67 @@
   </head>
 
   <body>
-    <!-- Registro -->
-    <section id="login" class="screen">
-      <form id="login-form" class="login-card">
+    <!-- Arranque -->
+    <section id="boot" class="screen">
+      <p class="tagline">Conectando…</p>
+    </section>
+
+    <!-- Registro / inicio de sesión -->
+    <section id="login" class="screen hidden">
+      <div class="login-card">
         <h1>Hush</h1>
         <p class="tagline">Mensajería privada con cifrado post-cuántico</p>
-        <label>
-          Servidor
-          <input id="server-input" value="http://127.0.0.1:8080" required />
-        </label>
-        <label>
-          Nombre de usuario
-          <input id="username-input" placeholder="ej. alice" pattern="[A-Za-z0-9_]{1,32}" required autofocus />
-        </label>
-        <label>
-          Alias (nombre visible)
-          <input id="alias-input" placeholder="ej. Alicia G." maxlength="64" required />
-        </label>
-        <label>
-          Email
-          <input id="email-input" type="email" placeholder="tu@email.com" required />
-        </label>
-        <label>
-          Contraseña
-          <input id="password-input" type="password" minlength="8" placeholder="mínimo 8 caracteres" required />
-        </label>
-        <button type="submit" id="login-btn">Crear cuenta</button>
-        <p id="login-error" class="error"></p>
-      </form>
+        <div class="auth-tabs">
+          <button type="button" id="tab-register" class="auth-tab active">Crear cuenta</button>
+          <button type="button" id="tab-signin" class="auth-tab">Entrar</button>
+        </div>
+
+        <form id="login-form" class="auth-form">
+          <label>
+            Servidor
+            <input id="server-input" value="http://127.0.0.1:8080" required />
+          </label>
+          <label>
+            Nombre de usuario
+            <input id="username-input" placeholder="ej. alice" pattern="[A-Za-z0-9_]{1,32}" required autofocus />
+          </label>
+          <label>
+            Alias (nombre visible)
+            <input id="alias-input" placeholder="ej. Alicia G." maxlength="64" required />
+          </label>
+          <label>
+            Email
+            <input id="email-input" type="email" placeholder="tu@email.com" required />
+          </label>
+          <label>
+            Contraseña
+            <input id="password-input" type="password" minlength="8" placeholder="mínimo 8 caracteres" required />
+          </label>
+          <button type="submit" id="login-btn">Crear cuenta</button>
+          <p id="login-error" class="error"></p>
+        </form>
+
+        <form id="signin-form" class="auth-form hidden">
+          <label>
+            Servidor
+            <input id="signin-server-input" value="http://127.0.0.1:8080" required />
+          </label>
+          <label>
+            Nombre de usuario
+            <input id="signin-username-input" placeholder="ej. alice" pattern="[A-Za-z0-9_]{1,32}" required />
+          </label>
+          <label>
+            Contraseña
+            <input id="signin-password-input" type="password" required />
+          </label>
+          <button type="submit" id="signin-btn">Entrar</button>
+          <p id="signin-error" class="error"></p>
+          <p class="hint">
+            Si entras desde un dispositivo nuevo se generarán claves de cifrado
+            nuevas; el historial anterior no se transfiere.
+          </p>
+        </form>
+      </div>
     </section>
 
     <!-- Verificación por email -->

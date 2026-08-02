@@ -328,15 +328,18 @@ async fn get_profile(
     State(state): State<AppState>,
     Path(username): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let row = sqlx::query("SELECT alias FROM accounts WHERE username = ? AND verified = 1")
-        .bind(&username)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(internal)?
-        .ok_or((StatusCode::NOT_FOUND, "no such user".into()))?;
+    let row = sqlx::query(
+        "SELECT alias, identity_key FROM accounts WHERE username = ? AND verified = 1",
+    )
+    .bind(&username)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(internal)?
+    .ok_or((StatusCode::NOT_FOUND, "no such user".into()))?;
     Ok(Json(serde_json::json!({
         "username": username,
         "alias": row.get::<String, _>(0),
+        "identity_key": row.get::<String, _>(1),
     })))
 }
 
@@ -351,6 +354,10 @@ struct UploadKeysRequest {
     /// Opaque JSON: signed prekey, last-resort kyber prekey, signatures.
     bundle_static: serde_json::Value,
     one_time_prekeys: Vec<PrekeyUpload>,
+    /// Present when the device (re)provisioned its identity, e.g. after
+    /// logging in on a new device.
+    identity_key: Option<String>,
+    registration_id: Option<i64>,
 }
 
 async fn upload_keys(
@@ -365,6 +372,16 @@ async fn upload_keys(
         .execute(&mut *tx)
         .await
         .map_err(internal)?;
+    if let (Some(identity_key), Some(registration_id)) = (&req.identity_key, req.registration_id) {
+        sqlx::query("UPDATE accounts SET identity_key = ?, registration_id = ? WHERE username = ?")
+            .bind(identity_key)
+            .bind(registration_id)
+            .bind(&auth.username)
+            .execute(&mut *tx)
+            .await
+            .map_err(internal)?;
+        tracing::info!(username = %auth.username, "identidad re-aprovisionada (nuevo dispositivo)");
+    }
     sqlx::query("DELETE FROM one_time_prekeys WHERE username = ?")
         .bind(&auth.username)
         .execute(&mut *tx)

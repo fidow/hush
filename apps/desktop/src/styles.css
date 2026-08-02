@@ -33,11 +33,42 @@ body {
   height: 100vh;
 }
 
-/* ---- Login ---- */
-#login {
+/* ---- Login / verificación ---- */
+#boot,
+#login,
+#verify {
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+.auth-tabs {
+  display: flex;
+  gap: 0.4rem;
+  margin-bottom: 0.3rem;
+}
+
+.auth-tab {
+  flex: 1;
+  background: var(--panel-2);
+  opacity: 0.6;
+}
+
+.auth-tab.active {
+  background: var(--accent-2);
+  opacity: 1;
+}
+
+.auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.hint {
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.35;
 }
 
 .login-card {

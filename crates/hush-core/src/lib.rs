@@ -6,10 +6,13 @@
 
 pub mod api;
 pub mod client;
+pub mod db;
 pub mod engine;
+pub mod store;
 
-pub use api::{ApiClient, IncomingMessage};
-pub use client::{DecryptedMessage, HushClient};
+pub use api::{ApiClient, IncomingMessage, RemoteProfile};
+pub use client::{DecryptedMessage, HushClient, ProfileInfo};
+pub use db::{LocalDb, Profile, StoredMessage};
 pub use engine::Engine;
 
 #[cfg(test)]

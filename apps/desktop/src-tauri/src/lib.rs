@@ -2,8 +2,14 @@
 //! hush-core engine actor; the webview only ever sees the local user's own
 //! plaintext.
 
-use hush_core::HushClient;
+use hush_core::{HushClient, ProfileInfo, StoredMessage};
 use tauri::{Emitter, Manager, State};
+
+/// The account stored on this device, if any.
+#[tauri::command]
+async fn load_profile(client: State<'_, HushClient>) -> Result<Option<ProfileInfo>, String> {
+    client.load_profile().await
+}
 
 /// Creates the account on `server` (pending email verification). Returns the
 /// dev verification code when the server echoes it (HUSH_ECHO_CODE=1).
@@ -21,15 +27,30 @@ async fn register(
         .await
 }
 
-/// Confirms the account with the emailed code, publishes prekeys and starts
-/// the incoming message stream (delivered as `hush://message` events).
+/// Confirms the account with the emailed code and saves the profile locally.
+/// The UI should call `connect` afterwards.
 #[tauri::command]
-async fn verify(
-    app: tauri::AppHandle,
+async fn verify(client: State<'_, HushClient>, code: String) -> Result<(), String> {
+    client.verify(&code).await
+}
+
+/// Logs into an existing account (re-provisioning keys if this is a new
+/// device). The UI should call `connect` afterwards.
+#[tauri::command]
+async fn login(
     client: State<'_, HushClient>,
-    code: String,
-) -> Result<(), String> {
-    let mut rx = client.verify(&code).await?;
+    server: String,
+    username: String,
+    password: String,
+) -> Result<ProfileInfo, String> {
+    client.login(&server, &username, &password).await
+}
+
+/// Opens the message stream; incoming messages arrive as `hush://message`
+/// events until disconnect (`hush://disconnected`).
+#[tauri::command]
+async fn connect(app: tauri::AppHandle, client: State<'_, HushClient>) -> Result<(), String> {
+    let mut rx = client.connect().await?;
     tauri::async_runtime::spawn(async move {
         while let Some(msg) = rx.recv().await {
             let _ = app.emit(
@@ -47,21 +68,33 @@ async fn verify(
     Ok(())
 }
 
-/// Encrypts and sends `text` to `recipient`, establishing a PQXDH session
-/// from their published bundle if none exists yet.
+/// Encrypts and sends `text` to `recipient`; returns the stored message.
 #[tauri::command]
 async fn send_message(
     client: State<'_, HushClient>,
     recipient: String,
     text: String,
-) -> Result<(), String> {
+) -> Result<StoredMessage, String> {
     client.send_text(&recipient, &text).await
 }
 
-/// Public alias of a user; also validates that the user exists.
+/// Validates the user exists, stores it as a contact, returns its alias.
 #[tauri::command]
-async fn get_profile(client: State<'_, HushClient>, username: String) -> Result<String, String> {
-    client.fetch_alias(&username).await
+async fn add_contact(client: State<'_, HushClient>, username: String) -> Result<String, String> {
+    client.add_contact(&username).await
+}
+
+#[tauri::command]
+async fn get_contacts(client: State<'_, HushClient>) -> Result<Vec<(String, String)>, String> {
+    client.contacts().await
+}
+
+#[tauri::command]
+async fn get_history(
+    client: State<'_, HushClient>,
+    contact: String,
+) -> Result<Vec<StoredMessage>, String> {
+    client.history(&contact).await
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -69,14 +102,26 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            app.manage(HushClient::spawn());
+            let dir = app.path().app_data_dir()?;
+            // HUSH_PROFILE lets several instances coexist on one machine
+            // (useful to test two accounts locally).
+            let file = match std::env::var("HUSH_PROFILE") {
+                Ok(p) if !p.is_empty() => format!("hush-{p}.db"),
+                _ => "hush.db".to_string(),
+            };
+            app.manage(HushClient::spawn(dir.join(file)));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            load_profile,
             register,
             verify,
+            login,
+            connect,
             send_message,
-            get_profile
+            add_contact,
+            get_contacts,
+            get_history
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

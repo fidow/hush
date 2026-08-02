@@ -8,6 +8,13 @@ use tokio::sync::mpsc;
 
 /// A message delivered by the server. `body` is an opaque envelope for
 /// [`crate::engine::Engine::decrypt`].
+/// Public profile of another user as served by the relay.
+#[derive(Clone, Debug)]
+pub struct RemoteProfile {
+    pub alias: String,
+    pub identity_key: String,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct IncomingMessage {
     pub id: String,
@@ -118,14 +125,17 @@ impl ApiClient {
         Ok(())
     }
 
-    /// Public profile (alias) of a user.
-    pub async fn fetch_profile(&self, username: &str) -> Result<String> {
+    /// Public profile (alias + current identity key) of a user.
+    pub async fn fetch_profile(&self, username: &str) -> Result<RemoteProfile> {
         let req = self.auth(
             self.http
                 .get(format!("{}/v1/profile/{username}", self.base)),
         )?;
         let body: Value = Self::check(req.send().await?).await?.json().await?;
-        Ok(body["alias"].as_str().unwrap_or_default().to_string())
+        Ok(RemoteProfile {
+            alias: body["alias"].as_str().unwrap_or_default().to_string(),
+            identity_key: body["identity_key"].as_str().unwrap_or_default().to_string(),
+        })
     }
 
     pub async fn upload_keys(&self, body: &Value) -> Result<()> {

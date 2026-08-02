@@ -1,5 +1,6 @@
 //! Cryptographic engine: identity, prekey bundles, PQXDH session establishment
-//! and Double Ratchet messaging, all via libsignal.
+//! and Double Ratchet messaging, all via libsignal, persisted in the local
+//! SQLite database so state survives restarts.
 //!
 //! Wire conventions (everything the server sees is opaque):
 //! - Keys travel base64-encoded inside small JSON documents.
@@ -12,24 +13,26 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use libsignal_protocol::{
     kem, message_decrypt, message_encrypt, process_prekey_bundle, CiphertextMessage, DeviceId,
-    GenericSignedPreKey, IdentityKey, IdentityKeyPair, IdentityKeyStore, InMemSignalProtocolStore, KeyPair,
-    KyberPreKeyRecord, KyberPreKeyStore, PreKeyBundle, PreKeyRecord, PreKeySignalMessage,
-    PreKeyStore, ProtocolAddress, PublicKey, SessionStore, SignalMessage, SignedPreKeyRecord,
+    GenericSignedPreKey, IdentityKey, IdentityKeyStore, KeyPair, KyberPreKeyRecord,
+    KyberPreKeyStore, PreKeyBundle, PreKeyRecord, PreKeySignalMessage, PreKeyStore,
+    ProtocolAddress, PublicKey, SessionStore, SignalMessage, SignedPreKeyRecord,
     SignedPreKeyStore, Timestamp,
 };
-use rand::{CryptoRng, Rng, RngCore, TryRngCore};
-
-/// OS-backed CSPRNG. Unlike `os_rng()` (ThreadRng) this is `Send`, which
-/// keeps the async methods usable from tauri commands and spawned tasks.
-fn os_rng() -> impl CryptoRng + RngCore + Send {
-    rand::rngs::OsRng.unwrap_err()
-}
+use rand::{CryptoRng, RngCore, TryRngCore};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-const SIGNED_PREKEY_ID: u32 = 1;
-const KYBER_LAST_RESORT_ID: u32 = 1;
-const ONE_TIME_ID_BASE: u32 = 100;
+use crate::db::LocalDb;
+use crate::store::{
+    SqliteIdentityStore, SqliteKyberPreKeyStore, SqlitePreKeyStore, SqliteSessionStore,
+    SqliteSignedPreKeyStore,
+};
+
+/// OS-backed CSPRNG. Unlike `rand::rng()` (ThreadRng) this is `Send`, which
+/// keeps the async methods usable from spawned tasks.
+pub(crate) fn os_rng() -> impl CryptoRng + RngCore + Send {
+    rand::rngs::OsRng.unwrap_err()
+}
 
 fn device_one() -> DeviceId {
     DeviceId::new(1).expect("1 is a valid device id")
@@ -51,21 +54,29 @@ struct Envelope {
 }
 
 pub struct Engine {
-    store: InMemSignalProtocolStore,
+    db: LocalDb,
     address: ProtocolAddress,
+    sessions: SqliteSessionStore,
+    prekeys: SqlitePreKeyStore,
+    signed_prekeys: SqliteSignedPreKeyStore,
+    kyber_prekeys: SqliteKyberPreKeyStore,
+    identity: SqliteIdentityStore,
 }
 
 impl Engine {
-    /// Generates a fresh identity for `username`.
-    pub fn new(username: &str) -> Result<Self> {
-        let mut rng = os_rng();
-        let identity = IdentityKeyPair::generate(&mut rng);
-        let registration_id: u32 = rng.random_range(1..16380);
-        let store = InMemSignalProtocolStore::new(identity, registration_id)
-            .map_err(|e| anyhow!("create store: {e}"))?;
+    /// Opens the engine over the local database, loading the persisted
+    /// identity or generating a fresh one on first use.
+    pub fn open(db: LocalDb, username: &str) -> Result<Self> {
+        let identity = SqliteIdentityStore { db: db.clone() };
+        identity.ensure_identity()?;
         Ok(Self {
-            store,
             address: ProtocolAddress::new(username.to_string(), device_one()),
+            sessions: SqliteSessionStore { db: db.clone() },
+            prekeys: SqlitePreKeyStore { db: db.clone() },
+            signed_prekeys: SqliteSignedPreKeyStore { db: db.clone() },
+            kyber_prekeys: SqliteKyberPreKeyStore { db: db.clone() },
+            identity,
+            db,
         })
     }
 
@@ -74,50 +85,48 @@ impl Engine {
     }
 
     pub async fn registration_id(&self) -> Result<u32> {
-        Ok(self.store.get_local_registration_id().await?)
+        Ok(self.identity.get_local_registration_id().await?)
     }
 
     /// Base64 public identity key, as sent to the server at registration.
     pub async fn identity_key_b64(&self) -> Result<String> {
-        let pair = self.store.get_identity_key_pair().await?;
+        let pair = self.identity.get_identity_key_pair().await?;
         Ok(B64.encode(pair.public_key().serialize()))
     }
 
-    /// Generates the signed prekey, last-resort kyber prekey and `n` one-time
-    /// prekeys of each kind; stores the private halves locally and returns the
-    /// JSON body for `PUT /v1/keys`.
+    /// Generates a fresh signed prekey, last-resort kyber prekey and `n`
+    /// one-time prekeys of each kind; stores the private halves locally and
+    /// returns the JSON body for `PUT /v1/keys`.
     pub async fn generate_prekeys(&mut self, n: u32) -> Result<Value> {
         let mut rng = os_rng();
-        let identity = self.store.get_identity_key_pair().await?;
+        let identity = self.identity.get_identity_key_pair().await?;
 
+        let spk_id = self.db.next_id("signed_prekeys")?;
         let spk_pair = KeyPair::generate(&mut rng);
         let spk_sig = identity
             .private_key()
             .calculate_signature(&spk_pair.public_key.serialize(), &mut rng)?;
-        let spk = SignedPreKeyRecord::new(
-            SIGNED_PREKEY_ID.into(),
-            now_timestamp(),
-            &spk_pair,
-            &spk_sig,
-        );
-        self.store
-            .save_signed_pre_key(SIGNED_PREKEY_ID.into(), &spk)
+        let spk = SignedPreKeyRecord::new(spk_id.into(), now_timestamp(), &spk_pair, &spk_sig);
+        self.signed_prekeys
+            .save_signed_pre_key(spk_id.into(), &spk)
             .await?;
 
+        let kyber_last_resort_id = self.db.next_id("kyber_prekeys")?;
         let kyber_last_resort = KyberPreKeyRecord::generate(
             kem::KeyType::Kyber1024,
-            KYBER_LAST_RESORT_ID.into(),
+            kyber_last_resort_id.into(),
             identity.private_key(),
         )?;
-        self.store
-            .save_kyber_pre_key(KYBER_LAST_RESORT_ID.into(), &kyber_last_resort)
+        self.kyber_prekeys
+            .save_kyber_pre_key(kyber_last_resort_id.into(), &kyber_last_resort)
             .await?;
 
         let mut one_time = Vec::new();
+        let first_ec = self.db.next_id("prekeys")?;
         for i in 0..n {
-            let id = ONE_TIME_ID_BASE + i;
+            let id = first_ec + i;
             let record = PreKeyRecord::new(id.into(), &KeyPair::generate(&mut rng));
-            self.store.save_pre_key(id.into(), &record).await?;
+            self.prekeys.save_pre_key(id.into(), &record).await?;
             one_time.push(json!({
                 "kind": "ec",
                 "data": json!({
@@ -126,12 +135,13 @@ impl Engine {
                 }).to_string(),
             }));
 
+            let id = kyber_last_resort_id + 1 + i;
             let record = KyberPreKeyRecord::generate(
                 kem::KeyType::Kyber1024,
                 id.into(),
                 identity.private_key(),
             )?;
-            self.store.save_kyber_pre_key(id.into(), &record).await?;
+            self.kyber_prekeys.save_kyber_pre_key(id.into(), &record).await?;
             one_time.push(json!({
                 "kind": "kyber",
                 "data": json!({
@@ -143,15 +153,17 @@ impl Engine {
         }
 
         Ok(json!({
+            "identity_key": B64.encode(identity.public_key().serialize()),
+            "registration_id": self.registration_id().await?,
             "bundle_static": {
                 "device_id": 1,
                 "signed_prekey": {
-                    "id": SIGNED_PREKEY_ID,
+                    "id": spk_id,
                     "public": B64.encode(spk_pair.public_key.serialize()),
                     "signature": B64.encode(&spk_sig),
                 },
                 "kyber_last_resort": {
-                    "id": KYBER_LAST_RESORT_ID,
+                    "id": kyber_last_resort_id,
                     "public": B64.encode(kyber_last_resort.public_key()?.serialize()),
                     "signature": B64.encode(kyber_last_resort.signature()?),
                 },
@@ -162,14 +174,36 @@ impl Engine {
 
     pub async fn has_session(&self, remote: &str) -> Result<bool> {
         let addr = ProtocolAddress::new(remote.to_string(), device_one());
-        Ok(self.store.load_session(&addr).await?.is_some())
+        Ok(self.sessions.load_session(&addr).await?.is_some())
+    }
+
+    /// The identity key we have on record for `remote`, if any (base64).
+    pub async fn known_identity_b64(&self, remote: &str) -> Result<Option<String>> {
+        let addr = ProtocolAddress::new(remote.to_string(), device_one());
+        Ok(self
+            .identity
+            .get_identity(&addr)
+            .await?
+            .map(|k| B64.encode(k.serialize())))
+    }
+
+    /// Drops the session and recorded identity for `remote` (e.g. after the
+    /// contact re-provisioned their keys on a new device).
+    pub fn reset_session(&mut self, remote: &str) -> Result<()> {
+        let addr = ProtocolAddress::new(remote.to_string(), device_one());
+        let key = format!("{}:{}", addr.name(), u32::from(addr.device_id()));
+        self.db.with(|c| {
+            c.execute("DELETE FROM sessions WHERE address = ?1", [&key])?;
+            c.execute("DELETE FROM identities WHERE address = ?1", [&key])?;
+            Ok(())
+        })
     }
 
     /// Establishes a PQXDH session with `remote` from a bundle returned by
     /// `GET /v1/keys/{remote}`. No-op if a session already exists.
     pub async fn ensure_session(&mut self, remote: &str, bundle: &Value) -> Result<()> {
         let addr = ProtocolAddress::new(remote.to_string(), device_one());
-        if self.store.load_session(&addr).await?.is_some() {
+        if self.sessions.load_session(&addr).await?.is_some() {
             return Ok(());
         }
 
@@ -220,8 +254,8 @@ impl Engine {
         process_prekey_bundle(
             &addr,
             &self.address,
-            &mut self.store.session_store,
-            &mut self.store.identity_store,
+            &mut self.sessions,
+            &mut self.identity,
             &pqxdh_bundle,
             SystemTime::now(),
             &mut os_rng(),
@@ -238,8 +272,8 @@ impl Engine {
             plaintext,
             &addr,
             &self.address,
-            &mut self.store.session_store,
-            &mut self.store.identity_store,
+            &mut self.sessions,
+            &mut self.identity,
             SystemTime::now(),
             &mut os_rng(),
         )
@@ -271,11 +305,11 @@ impl Engine {
             &msg,
             &addr,
             &self.address,
-            &mut self.store.session_store,
-            &mut self.store.identity_store,
-            &mut self.store.pre_key_store,
-            &self.store.signed_pre_key_store,
-            &mut self.store.kyber_pre_key_store,
+            &mut self.sessions,
+            &mut self.identity,
+            &mut self.prekeys,
+            &self.signed_prekeys,
+            &mut self.kyber_prekeys,
             &mut os_rng(),
         )
         .await?;

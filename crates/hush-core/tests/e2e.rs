@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use hush_core::{ApiClient, Engine};
+use hush_core::{ApiClient, Engine, LocalDb};
 use sqlx::Row;
 
 async fn spawn_server() -> (String, sqlx::SqlitePool) {
@@ -23,7 +23,7 @@ async fn spawn_server() -> (String, sqlx::SqlitePool) {
 }
 
 async fn onboard(base: &str, pool: &sqlx::SqlitePool, username: &str) -> (Engine, ApiClient) {
-    let mut engine = Engine::new(username).unwrap();
+    let mut engine = Engine::open(LocalDb::open_in_memory().unwrap(), username).unwrap();
     let mut api = ApiClient::new(base);
     api.register(
         username,
@@ -63,7 +63,10 @@ async fn encrypted_roundtrip_with_offline_delivery() {
     let (mut bob, bob_api) = onboard(&base, &pool, "bob").await;
 
     // Aliases are public profile data served to authenticated users.
-    assert_eq!(alice_api.fetch_profile("bob").await.unwrap(), "Alias de bob");
+    assert_eq!(
+        alice_api.fetch_profile("bob").await.unwrap().alias,
+        "Alias de bob"
+    );
 
     // Alice establishes a PQXDH session from Bob's public bundle and sends
     // while Bob is offline.
