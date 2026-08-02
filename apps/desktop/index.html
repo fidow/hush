@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="es">
+<html>
   <head>
     <meta charset="UTF-8" />
     <link rel="stylesheet" href="/src/styles.css" />
@@ -11,81 +11,67 @@
   <body>
     <!-- Arranque -->
     <section id="boot" class="screen">
-      <p class="tagline">Conectando…</p>
+      <p class="tagline" data-i18n="boot.connecting"></p>
     </section>
 
     <!-- Registro / inicio de sesión -->
     <section id="login" class="screen hidden">
       <div class="login-card">
         <h1>Hush</h1>
-        <p class="tagline">Mensajería privada con cifrado post-cuántico</p>
+        <p class="tagline" data-i18n="app.tagline"></p>
+
         <form id="signin-form" class="auth-form">
           <label>
-            Servidor
+            <span data-i18n="auth.server"></span>
             <select id="signin-server-input" required></select>
             <span id="signin-server-url" class="field-note"></span>
           </label>
           <label>
-            Nombre de usuario
-            <input id="signin-username-input" placeholder="ej. alice" pattern="[A-Za-z0-9_]{1,32}" required autofocus />
+            <span data-i18n="auth.username"></span>
+            <input id="signin-username-input" data-i18n-placeholder="auth.username.placeholder" pattern="[A-Za-z0-9_]{1,32}" required autofocus />
           </label>
           <label>
-            Contraseña
+            <span data-i18n="auth.password"></span>
             <input id="signin-password-input" type="password" required />
           </label>
-          <label>
-            Frase de historial <small>(solo en un dispositivo nuevo)</small>
-            <input id="signin-history-input" type="password" placeholder="para recuperar tus conversaciones" />
-          </label>
-          <button type="submit" id="signin-btn">Entrar</button>
+          <button type="submit" id="signin-btn" data-i18n="auth.signin"></button>
           <p id="signin-error" class="error"></p>
-          <p class="hint">
-            En un dispositivo nuevo se generan claves de cifrado nuevas. Tu
-            historial se recupera del archivo cifrado si escribes tu frase de
-            historial: nadie más puede leerlo, ni el servidor.
-          </p>
-          <button type="button" id="to-register" class="switch-link">
-            ¿No tienes cuenta? Crear una
-          </button>
+          <p class="hint" data-i18n="auth.signin.note"></p>
+          <button type="button" id="to-register" class="switch-link" data-i18n="auth.toRegister"></button>
         </form>
 
         <form id="login-form" class="auth-form hidden">
           <label>
-            Servidor
+            <span data-i18n="auth.server"></span>
             <select id="server-input" required></select>
             <span id="server-url" class="field-note"></span>
           </label>
           <label>
-            Nombre de usuario
-            <input id="username-input" placeholder="ej. alice" pattern="[A-Za-z0-9_]{1,32}" required />
+            <span data-i18n="auth.username"></span>
+            <input id="username-input" data-i18n-placeholder="auth.username.placeholder" pattern="[A-Za-z0-9_]{1,32}" required />
           </label>
           <label>
-            Alias (nombre visible)
-            <input id="alias-input" placeholder="ej. Alicia G." maxlength="64" required />
+            <span data-i18n="auth.alias"></span>
+            <input id="alias-input" data-i18n-placeholder="auth.alias.placeholder" maxlength="64" required />
           </label>
           <label>
-            Email
-            <input id="email-input" type="email" placeholder="tu@email.com" required />
+            <span data-i18n="auth.email"></span>
+            <input id="email-input" type="email" placeholder="you@example.com" required />
           </label>
           <label>
-            Contraseña
-            <input id="password-input" type="password" minlength="8" placeholder="mínimo 8 caracteres" required />
+            <span data-i18n="auth.password"></span>
+            <input id="password-input" type="password" minlength="8" data-i18n-placeholder="auth.password.placeholder" required />
           </label>
-          <label>
-            Frase de historial
-            <input id="history-input" type="password" minlength="8" placeholder="distinta de la contraseña" required />
-          </label>
-          <p class="hint">
-            La frase de historial cifra tus conversaciones para poder
-            recuperarlas en otro dispositivo. El servidor nunca la conoce:
-            si la olvidas, el historial no se puede recuperar.
-          </p>
-          <button type="submit" id="login-btn">Crear cuenta</button>
+          <p class="hint" data-i18n="auth.history.note"></p>
+          <button type="submit" id="login-btn" data-i18n="auth.register"></button>
           <p id="login-error" class="error"></p>
-          <button type="button" id="to-signin" class="switch-link">
-            ¿Ya tienes cuenta? Entrar
-          </button>
+          <button type="button" id="to-signin" class="switch-link" data-i18n="auth.toSignin"></button>
         </form>
+
+        <label class="lang-picker">
+          <span data-i18n="settings.language"></span>
+          <select id="lang-input"></select>
+        </label>
       </div>
     </section>
 
@@ -93,15 +79,12 @@
     <section id="verify" class="screen hidden">
       <form id="verify-form" class="login-card">
         <h1>📮</h1>
-        <p class="tagline">
-          Te hemos enviado un código de 6 dígitos a tu email.<br />Introdúcelo para
-          activar la cuenta.
-        </p>
+        <p class="tagline" data-i18n="verify.note"></p>
         <label>
-          Código de verificación
+          <span data-i18n="verify.code"></span>
           <input id="code-input" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" placeholder="000000" required />
         </label>
-        <button type="submit" id="verify-btn">Verificar</button>
+        <button type="submit" id="verify-btn" data-i18n="verify.submit"></button>
         <p id="verify-error" class="error"></p>
       </form>
     </section>
@@ -110,46 +93,88 @@
     <section id="chat" class="screen hidden">
       <aside class="sidebar">
         <header class="me">
-          <span class="dot"></span>
+          <span id="me-dot" class="dot status-online"></span>
           <div class="me-names">
             <span id="me-alias"></span>
             <small id="me-name"></small>
           </div>
+          <button type="button" id="settings-btn" class="icon-btn" data-i18n-title="chat.settings">⚙</button>
         </header>
         <form id="add-contact-form">
-          <input id="add-contact-input" placeholder="añadir contacto…" pattern="[A-Za-z0-9_]{1,32}" />
+          <input id="add-contact-input" data-i18n-placeholder="chat.addContact" pattern="[A-Za-z0-9_]{1,32}" />
         </form>
         <ul id="contact-list"></ul>
       </aside>
       <main class="conversation">
-        <header id="conv-header">Selecciona un contacto</header>
+        <header id="conv-header" data-i18n="chat.pickContact"></header>
         <div id="messages"></div>
         <div id="emoji-panel" class="hidden">
           <div id="emoji-tabs"></div>
           <div id="emoji-grid"></div>
         </div>
         <form id="send-form">
-          <button type="button" id="emoji-btn" title="Emojis" disabled>🙂</button>
-          <input id="send-input" placeholder="Escribe un mensaje cifrado…" autocomplete="off" disabled />
-          <button type="submit" id="send-btn" disabled>Enviar</button>
+          <button type="button" id="emoji-btn" data-i18n-title="chat.emojis" disabled>🙂</button>
+          <input id="send-input" data-i18n-placeholder="chat.messagePlaceholder" autocomplete="off" disabled />
+          <button type="submit" id="send-btn" data-i18n="chat.send" disabled></button>
         </form>
       </main>
     </section>
 
+    <!-- Ajustes -->
+    <div id="settings" class="overlay hidden">
+      <form id="settings-form" class="settings-card">
+        <h2 data-i18n="settings.title"></h2>
+        <label>
+          <span data-i18n="settings.alias"></span>
+          <input id="settings-alias" maxlength="64" required />
+        </label>
+        <label>
+          <span data-i18n="settings.status"></span>
+          <select id="settings-status"></select>
+        </label>
+        <label>
+          <span data-i18n="settings.language"></span>
+          <select id="settings-lang"></select>
+        </label>
+        <p id="settings-error" class="error"></p>
+        <div class="settings-actions">
+          <button type="button" id="settings-close" class="secondary" data-i18n="settings.close"></button>
+          <button type="submit" id="settings-save" data-i18n="settings.save"></button>
+        </div>
+
+        <hr />
+
+        <h3 data-i18n="recovery.title"></h3>
+        <p class="hint" data-i18n="recovery.note"></p>
+        <div class="recovery-row">
+          <code id="recovery-code" class="recovery-code">••••</code>
+          <button type="button" id="recovery-show" class="secondary" data-i18n="recovery.show"></button>
+          <button type="button" id="recovery-copy" class="secondary" data-i18n="recovery.copy"></button>
+        </div>
+
+        <h3 data-i18n="restore.title"></h3>
+        <p class="hint" data-i18n="restore.note"></p>
+        <div class="recovery-row">
+          <input id="restore-input" data-i18n-placeholder="restore.placeholder" />
+          <button type="button" id="restore-btn" data-i18n="restore.action"></button>
+        </div>
+      </form>
+    </div>
+
     <!-- Vista previa de imagen pegada -->
     <div id="img-preview" class="overlay hidden">
       <div class="img-preview-card">
-        <img id="img-preview-img" alt="Imagen a enviar" />
+        <img id="img-preview-img" data-i18n-title="image.preview" alt="" />
         <div class="img-preview-actions">
-          <button type="button" id="img-cancel" class="secondary">Cancelar</button>
-          <button type="button" id="img-send">Enviar imagen</button>
+          <button type="button" id="img-cancel" class="secondary" data-i18n="image.cancel"></button>
+          <button type="button" id="img-send" data-i18n="image.send"></button>
         </div>
       </div>
     </div>
 
-    <!-- Visor de imagen (clic para ampliar) -->
+    <!-- Visor de imagen -->
     <div id="img-lightbox" class="overlay hidden">
-      <img id="img-lightbox-img" alt="Imagen ampliada" />
+      <img id="img-lightbox-img" alt="" />
     </div>
 
     <div id="toast" class="hidden"></div>

@@ -21,17 +21,9 @@ async fn register(
     alias: String,
     email: String,
     password: String,
-    historyPassphrase: String,
 ) -> Result<Option<String>, String> {
     client
-        .register(
-            &server,
-            &username,
-            &alias,
-            &email,
-            &password,
-            &historyPassphrase,
-        )
+        .register(&server, &username, &alias, &email, &password)
         .await
 }
 
@@ -50,11 +42,21 @@ async fn login(
     server: String,
     username: String,
     password: String,
-    historyPassphrase: String,
 ) -> Result<ProfileInfo, String> {
-    client
-        .login(&server, &username, &password, &historyPassphrase)
-        .await
+    client.login(&server, &username, &password).await
+}
+
+/// The recovery key of this device, for the user to copy and keep.
+#[tauri::command]
+async fn get_recovery_code(client: State<'_, HushClient>) -> Result<String, String> {
+    client.recovery_code().await
+}
+
+/// Adopts a recovery key and pulls down the archived history. Returns how
+/// many messages were restored.
+#[tauri::command]
+async fn restore_history(client: State<'_, HushClient>, code: String) -> Result<usize, String> {
+    client.restore_history(&code).await
 }
 
 /// Opens the message stream; incoming messages arrive as `hush://message`
@@ -111,6 +113,22 @@ async fn get_contacts(client: State<'_, HushClient>) -> Result<Vec<(String, Stri
     client.contacts().await
 }
 
+/// Changes the local account's display name and/or presence.
+#[tauri::command]
+async fn update_me(
+    client: State<'_, HushClient>,
+    alias: Option<String>,
+    status: Option<String>,
+) -> Result<(), String> {
+    client.update_me(alias, status).await
+}
+
+/// Presence of every stored contact, as `[username, status]` pairs.
+#[tauri::command]
+async fn get_presence(client: State<'_, HushClient>) -> Result<Vec<(String, String)>, String> {
+    client.presence().await
+}
+
 #[tauri::command]
 async fn get_history(
     client: State<'_, HushClient>,
@@ -144,7 +162,11 @@ pub fn run() {
             send_image,
             add_contact,
             get_contacts,
-            get_history
+            get_history,
+            update_me,
+            get_presence,
+            get_recovery_code,
+            restore_history
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

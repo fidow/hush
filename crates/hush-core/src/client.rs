@@ -48,6 +48,8 @@ pub struct ProfileInfo {
     pub username: String,
     pub alias: String,
     pub server: String,
+    /// Presence the user last chose on this device.
+    pub status: String,
 }
 
 enum Command {
@@ -60,7 +62,6 @@ enum Command {
         alias: String,
         email: String,
         password: String,
-        history_passphrase: String,
         reply: oneshot::Sender<Result<Option<String>, String>>,
     },
     Verify {
@@ -71,9 +72,17 @@ enum Command {
         server: String,
         username: String,
         password: String,
-        /// Needed only to restore history on a device that doesn't have it.
-        history_passphrase: String,
         reply: oneshot::Sender<Result<ProfileInfo, String>>,
+    },
+    /// The recovery key held by this device, shown to the user on request.
+    RecoveryCode {
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    /// Adopts a recovery key and pulls the archive down. Usable at any time,
+    /// not just right after signing in.
+    RestoreHistory {
+        code: String,
+        reply: oneshot::Sender<Result<usize, String>>,
     },
     Connect {
         reply: oneshot::Sender<Result<mpsc::Receiver<DecryptedMessage>, String>>,
@@ -94,6 +103,14 @@ enum Command {
     History {
         contact: String,
         reply: oneshot::Sender<Result<Vec<StoredMessage>, String>>,
+    },
+    UpdateMe {
+        alias: Option<String>,
+        status: Option<String>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    Presence {
+        reply: oneshot::Sender<Result<Vec<(String, String)>, String>>,
     },
 }
 
@@ -146,15 +163,13 @@ impl HushClient {
         alias: &str,
         email: &str,
         password: &str,
-        history_passphrase: &str,
     ) -> Result<Option<String>, String> {
-        let (server, username, alias, email, password, history_passphrase) = (
+        let (server, username, alias, email, password) = (
             server.to_string(),
             username.to_string(),
             alias.to_string(),
             email.to_string(),
             password.to_string(),
-            history_passphrase.to_string(),
         );
         self.request(|reply| Command::Register {
             server,
@@ -162,7 +177,6 @@ impl HushClient {
             alias,
             email,
             password,
-            history_passphrase,
             reply,
         })
         .await
@@ -177,28 +191,36 @@ impl HushClient {
 
     /// Logs into an existing account. If this device already holds keys for
     /// that username they are reused; otherwise fresh keys are generated and
-    /// published (contacts will renegotiate sessions transparently).
+    /// published (contacts will renegotiate sessions transparently). History
+    /// is restored separately with [`Self::restore_history`].
     pub async fn login(
         &self,
         server: &str,
         username: &str,
         password: &str,
-        history_passphrase: &str,
     ) -> Result<ProfileInfo, String> {
-        let (server, username, password, history_passphrase) = (
-            server.to_string(),
-            username.to_string(),
-            password.to_string(),
-            history_passphrase.to_string(),
-        );
+        let (server, username, password) =
+            (server.to_string(), username.to_string(), password.to_string());
         self.request(|reply| Command::Login {
             server,
             username,
             password,
-            history_passphrase,
             reply,
         })
         .await
+    }
+
+    /// The recovery key of this device, formatted for the user to copy.
+    pub async fn recovery_code(&self) -> Result<String, String> {
+        self.request(|reply| Command::RecoveryCode { reply }).await
+    }
+
+    /// Adopts `code` as the history key and downloads the archive. Returns
+    /// how many messages were restored.
+    pub async fn restore_history(&self, code: &str) -> Result<usize, String> {
+        let code = code.to_string();
+        self.request(|reply| Command::RestoreHistory { code, reply })
+            .await
     }
 
     /// Opens the message stream for the locally stored account. The returned
@@ -254,6 +276,25 @@ impl HushClient {
         self.request(|reply| Command::History { contact, reply })
             .await
     }
+
+    /// Changes the display name and/or presence of the local account.
+    pub async fn update_me(
+        &self,
+        alias: Option<String>,
+        status: Option<String>,
+    ) -> Result<(), String> {
+        self.request(|reply| Command::UpdateMe {
+            alias,
+            status,
+            reply,
+        })
+        .await
+    }
+
+    /// Presence of every stored contact, as `username -> status`.
+    pub async fn presence(&self) -> Result<Vec<(String, String)>, String> {
+        self.request(|reply| Command::Presence { reply }).await
+    }
 }
 
 struct Session {
@@ -296,17 +337,14 @@ impl Actor {
         alias: &str,
         email: &str,
         password: &str,
-        history_passphrase: &str,
     ) -> anyhow::Result<Option<String>> {
-        if history_passphrase.len() < 8 {
-            anyhow::bail!("La frase de historial debe tener al menos 8 caracteres");
-        }
         // A new account means a clean slate on this device.
         self.db.clear_all()?;
         self.session = None;
         self.archive_key = None;
-        let salt = crate::archive::new_salt();
-        let archive_key = ArchiveKey::derive(history_passphrase, &salt)?;
+        // The history key is random, never derived from anything the user
+        // typed, and shown to them later as a recovery code.
+        let archive_key = ArchiveKey::generate();
         let engine = Engine::open(self.db.clone(), username)?;
         let mut api = ApiClient::new(server.trim_end_matches('/'));
         let dev_code = api
@@ -315,7 +353,6 @@ impl Actor {
                 alias,
                 email,
                 password,
-                &salt,
                 engine.registration_id().await?,
                 &engine.identity_key_b64().await?,
             )
@@ -374,6 +411,20 @@ impl Actor {
         }
     }
 
+    /// Adopts `code` as the history key: pulls the archive down, merges it
+    /// into the local database, and re-uploads anything this device had
+    /// archived under its previous key so nothing is orphaned.
+    async fn handle_restore(&mut self, code: &str) -> anyhow::Result<usize> {
+        let key = ArchiveKey::from_recovery_code(code)?;
+        let restored = self.restore_archive(&key).await?;
+        self.db.meta_set("archive_key", &key.to_b64())?;
+        self.archive_key = Some(key);
+        for msg in self.db.all_messages()? {
+            self.archive_message(&msg).await;
+        }
+        Ok(restored)
+    }
+
     /// Downloads the encrypted archive and merges it into the local database.
     /// Returns how many messages were restored.
     async fn restore_archive(&self, key: &ArchiveKey) -> anyhow::Result<usize> {
@@ -397,9 +448,9 @@ impl Actor {
                 Err(_) => failed += 1,
             }
         }
-        // All entries failing means the passphrase was wrong, not corruption.
+        // All entries failing means the key is wrong, not that data is bad.
         if restored == 0 && failed > 0 {
-            anyhow::bail!("Frase de historial incorrecta");
+            anyhow::bail!("wrong_recovery_key");
         }
         tracing::info!("restored {restored} archived messages ({failed} unreadable)");
         Ok(restored)
@@ -410,7 +461,6 @@ impl Actor {
         server: &str,
         username: &str,
         password: &str,
-        history_passphrase: &str,
     ) -> anyhow::Result<ProfileInfo> {
         let server = server.trim_end_matches('/');
         let same_account = self
@@ -426,7 +476,7 @@ impl Actor {
 
         let mut engine = Engine::open(self.db.clone(), username)?;
         let mut api = ApiClient::new(server);
-        let salt = api.login(username, password).await?;
+        api.login(username, password).await?;
 
         if !same_account {
             // Fresh keys for this device; publishing them also updates our
@@ -445,23 +495,26 @@ impl Actor {
         self.db.save_profile(&profile)?;
         self.session = Some(Session { engine, api });
 
-        // Restore the history archive when the user supplied their passphrase
-        // (needed on a device that has no local copy of the key).
-        self.archive_key = match self.db.meta_get("archive_key")? {
-            Some(stored) => Some(ArchiveKey::from_b64(&stored)?),
-            None if !history_passphrase.is_empty() => {
-                let key = ArchiveKey::derive(history_passphrase, &salt)?;
-                self.restore_archive(&key).await?;
+        // A device with no key yet gets one, so messages from now on are
+        // archived; the user restores older history from settings with the
+        // recovery code of their other device.
+        self.archive_key = Some(match self.db.meta_get("archive_key")? {
+            Some(stored) => ArchiveKey::from_b64(&stored)?,
+            None => {
+                let key = ArchiveKey::generate();
                 self.db.meta_set("archive_key", &key.to_b64())?;
-                Some(key)
+                key
             }
-            None => None,
-        };
+        });
 
         Ok(ProfileInfo {
             username: profile.username,
             alias: profile.alias,
             server: profile.server,
+            status: self
+                .db
+                .meta_get("status")?
+                .unwrap_or_else(|| "online".into()),
         })
     }
 
@@ -480,6 +533,12 @@ impl Actor {
             if let Some(stored) = self.db.meta_get("archive_key")? {
                 self.archive_key = ArchiveKey::from_b64(&stored).ok();
             }
+        }
+        // Re-assert the chosen presence: the server only reports it while a
+        // stream is open, so it must be refreshed on every reconnect.
+        if let (Some(status), Some(session)) = (self.db.meta_get("status")?, self.session.as_ref())
+        {
+            let _ = session.api.update_me(None, Some(&status)).await;
         }
         let session = self.session.as_ref().expect("just set");
         Ok(session.api.stream().await?)
@@ -608,23 +667,18 @@ async fn actor(db_path: PathBuf, mut commands: mpsc::Receiver<Command>) {
             cmd = commands.recv() => match cmd {
                 None => break,
                 Some(Command::LoadProfile { reply }) => {
+                    let status = actor.db.meta_get("status").ok().flatten();
                     let result = actor.db.profile().map(|p| p.map(|p| ProfileInfo {
                         username: p.username,
                         alias: p.alias,
                         server: p.server,
+                        status: status.unwrap_or_else(|| "online".into()),
                     }));
                     let _ = reply.send(result.map_err(|e| e.to_string()));
                 }
-                Some(Command::Register { server, username, alias, email, password, history_passphrase, reply }) => {
+                Some(Command::Register { server, username, alias, email, password, reply }) => {
                     let result = actor
-                        .handle_register(
-                            &server,
-                            &username.to_lowercase(),
-                            &alias,
-                            &email,
-                            &password,
-                            &history_passphrase,
-                        )
+                        .handle_register(&server, &username.to_lowercase(), &alias, &email, &password)
                         .await;
                     let _ = reply.send(result.map_err(|e| e.to_string()));
                 }
@@ -632,15 +686,22 @@ async fn actor(db_path: PathBuf, mut commands: mpsc::Receiver<Command>) {
                     let result = actor.handle_verify(&code).await;
                     let _ = reply.send(result.map_err(|e| e.to_string()));
                 }
-                Some(Command::Login { server, username, password, history_passphrase, reply }) => {
+                Some(Command::Login { server, username, password, reply }) => {
                     let result = actor
-                        .handle_login(
-                            &server,
-                            &username.to_lowercase(),
-                            &password,
-                            &history_passphrase,
-                        )
+                        .handle_login(&server, &username.to_lowercase(), &password)
                         .await;
+                    let _ = reply.send(result.map_err(|e| e.to_string()));
+                }
+                Some(Command::RecoveryCode { reply }) => {
+                    let result = actor
+                        .archive_key
+                        .as_ref()
+                        .map(|k| k.to_recovery_code())
+                        .ok_or_else(|| "no_recovery_key".to_string());
+                    let _ = reply.send(result);
+                }
+                Some(Command::RestoreHistory { code, reply }) => {
+                    let result = actor.handle_restore(&code).await;
                     let _ = reply.send(result.map_err(|e| e.to_string()));
                 }
                 Some(Command::Connect { reply }) => {
@@ -685,6 +746,47 @@ async fn actor(db_path: PathBuf, mut commands: mpsc::Receiver<Command>) {
                 }
                 Some(Command::History { contact, reply }) => {
                     let _ = reply.send(actor.db.history(&contact).map_err(|e| e.to_string()));
+                }
+                Some(Command::UpdateMe { alias, status, reply }) => {
+                    let result = match actor.session.as_ref() {
+                        None => Err("no_session".to_string()),
+                        Some(s) => s
+                            .api
+                            .update_me(alias.as_deref(), status.as_deref())
+                            .await
+                            .map_err(|e| e.to_string()),
+                    };
+                    // Keep the locally stored profile in step with the server.
+                    if result.is_ok() {
+                        if let (Some(alias), Ok(Some(mut profile))) = (&alias, actor.db.profile()) {
+                            profile.alias = alias.clone();
+                            let _ = actor.db.save_profile(&profile);
+                        }
+                        if let Some(status) = &status {
+                            let _ = actor.db.meta_set("status", status);
+                        }
+                    }
+                    let _ = reply.send(result);
+                }
+                Some(Command::Presence { reply }) => {
+                    let result = match actor.session.as_ref() {
+                        None => Err("no_session".to_string()),
+                        Some(s) => {
+                            let names: Vec<String> = actor
+                                .db
+                                .contacts()
+                                .unwrap_or_default()
+                                .into_iter()
+                                .map(|(u, _)| u)
+                                .collect();
+                            if names.is_empty() {
+                                Ok(Vec::new())
+                            } else {
+                                s.api.presence(&names).await.map_err(|e| e.to_string())
+                            }
+                        }
+                    };
+                    let _ = reply.send(result);
                 }
             },
             msg = async { stream.as_mut().expect("guarded by if").recv().await }, if stream.is_some() => {

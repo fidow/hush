@@ -13,6 +13,8 @@ use tokio::sync::mpsc;
 pub struct RemoteProfile {
     pub alias: String,
     pub identity_key: String,
+    /// "online", "away", "busy" or "offline".
+    pub status: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -51,30 +53,35 @@ impl ApiClient {
         Ok(req.bearer_auth(token))
     }
 
-    /// Turns error responses into user-presentable messages: the server's own
-    /// message for 4xx, a generic one for 5xx. No HTTP jargon reaches the UI.
+    /// Turns error responses into a stable error code the UI can localise
+    /// (the server answers in English with `{code, message}`). No HTTP jargon
+    /// reaches the UI; unrecognised bodies fall back to a generic code.
     async fn check(res: reqwest::Response) -> Result<reqwest::Response> {
         let status = res.status();
         if status.is_success() {
             return Ok(res);
         }
-        if status.is_server_error() {
-            let body = res.text().await.unwrap_or_default();
-            tracing::error!("server error {status}: {body}");
-            bail!("Error del servidor, inténtalo de nuevo");
-        }
         let body = res.text().await.unwrap_or_default();
-        if body.is_empty() {
-            bail!("La petición fue rechazada");
+        if status.is_server_error() {
+            tracing::error!("server error {status}: {body}");
+            bail!("internal_error");
         }
-        bail!(body);
+        let code = serde_json::from_str::<Value>(&body)
+            .ok()
+            .and_then(|v| v["code"].as_str().map(str::to_string));
+        match code {
+            Some(code) => bail!(code),
+            None => {
+                tracing::warn!("unparsable error body ({status}): {body}");
+                bail!("request_failed")
+            }
+        }
     }
 
-    /// Maps transport-level failures (server down, DNS, timeout) to a
-    /// user-presentable message.
+    /// Maps transport-level failures (server down, DNS, timeout) to a code.
     fn conn_err(e: reqwest::Error) -> anyhow::Error {
         tracing::warn!("connection error: {e}");
-        anyhow::anyhow!("No se pudo conectar con el servidor")
+        anyhow::anyhow!("connection_failed")
     }
 
     /// Creates the account (pending email verification). Returns the dev
@@ -86,7 +93,6 @@ impl ApiClient {
         alias: &str,
         email: &str,
         password: &str,
-        archive_salt: &str,
         registration_id: u32,
         identity_key_b64: &str,
     ) -> Result<Option<String>> {
@@ -98,7 +104,6 @@ impl ApiClient {
                 "alias": alias,
                 "email": email,
                 "password": password,
-                "archive_salt": archive_salt,
                 "registration_id": registration_id,
                 "identity_key": identity_key_b64,
             }))
@@ -128,9 +133,8 @@ impl ApiClient {
         Ok(())
     }
 
-    /// Logs into an existing (verified) account, stores the session token and
-    /// returns the account's history salt.
-    pub async fn login(&mut self, username: &str, password: &str) -> Result<String> {
+    /// Logs into an existing (verified) account and stores the session token.
+    pub async fn login(&mut self, username: &str, password: &str) -> Result<()> {
         let res = self
             .http
             .post(format!("{}/v1/sessions", self.base))
@@ -145,7 +149,7 @@ impl ApiClient {
                 .context("no token in response")?
                 .to_string(),
         );
-        Ok(body["archive_salt"].as_str().unwrap_or_default().to_string())
+        Ok(())
     }
 
     /// Uploads one encrypted history entry.
@@ -191,7 +195,43 @@ impl ApiClient {
         Ok(RemoteProfile {
             alias: body["alias"].as_str().unwrap_or_default().to_string(),
             identity_key: body["identity_key"].as_str().unwrap_or_default().to_string(),
+            status: body["status"].as_str().unwrap_or("offline").to_string(),
         })
+    }
+
+    /// Updates the caller's display name and/or presence.
+    pub async fn update_me(&self, alias: Option<&str>, status: Option<&str>) -> Result<()> {
+        let req = self.auth(self.http.patch(format!("{}/v1/me", self.base)))?;
+        Self::check(
+            req.json(&json!({ "alias": alias, "status": status }))
+                .send()
+                .await
+                .map_err(Self::conn_err)?,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Presence for a set of users, as `username -> status`.
+    pub async fn presence(&self, usernames: &[String]) -> Result<Vec<(String, String)>> {
+        let req = self.auth(self.http.post(format!("{}/v1/presence", self.base)))?;
+        let body: Value = Self::check(
+            req.json(&json!({ "usernames": usernames }))
+                .send()
+                .await
+                .map_err(Self::conn_err)?,
+        )
+        .await?
+        .json()
+        .await?;
+        Ok(body["presence"]
+            .as_object()
+            .map(|map| {
+                map.iter()
+                    .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("offline").to_string()))
+                    .collect()
+            })
+            .unwrap_or_default())
     }
 
     pub async fn upload_keys(&self, body: &Value) -> Result<()> {

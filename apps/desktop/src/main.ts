@@ -2,6 +2,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { CATEGORIES, MAX_RECENT, RECENT_KEY } from "./emoji";
+import { applyTranslations, LANGUAGES, lang, setLang, t, tError, type Lang } from "./i18n";
 
 interface Message {
   id: string;
@@ -25,10 +26,12 @@ interface ProfileInfo {
   username: string;
   alias: string;
   server: string;
+  status: string;
 }
 
 interface Contact {
   alias: string;
+  status: string;
   messages: Message[];
   loaded: boolean;
 }
@@ -40,9 +43,13 @@ const SERVERS: { name: string; url: string }[] = [
   { name: "Main Hush", url: "https://hush.villasante.es" },
 ];
 
+const SETTABLE_STATUSES = ["online", "away", "busy"] as const;
+const PRESENCE_POLL_MS = 20_000;
+
 const contacts = new Map<string, Contact>();
 let me = "";
 let myAlias = "";
+let myStatus = "online";
 let current: string | null = null;
 
 const $ = <T extends HTMLElement>(sel: string) => document.querySelector(sel) as T;
@@ -70,12 +77,22 @@ function contactLabel(name: string): string {
 function renderContactItem(name: string) {
   const li = document.querySelector<HTMLElement>(`#contact-list li[data-name="${name}"]`);
   if (!li) return;
+  const contact = contacts.get(name);
+  const unread = li.classList.contains("unread");
   li.replaceChildren();
+
+  const dot = document.createElement("span");
+  dot.className = `dot status-${contact?.status ?? "offline"}`;
+  dot.title = t(`status.${contact?.status ?? "offline"}`);
+  const names = document.createElement("div");
+  names.className = "contact-names";
   const alias = document.createElement("span");
   alias.textContent = contactLabel(name);
   const user = document.createElement("small");
   user.textContent = `@${name}`;
-  li.append(alias, user);
+  names.append(alias, user);
+  li.append(dot, names);
+  li.classList.toggle("unread", unread);
 }
 
 function ensureContact(name: string, alias?: string) {
@@ -87,7 +104,7 @@ function ensureContact(name: string, alias?: string) {
     }
     return;
   }
-  contacts.set(name, { alias: alias ?? name, messages: [], loaded: false });
+  contacts.set(name, { alias: alias ?? name, status: "offline", messages: [], loaded: false });
   const li = document.createElement("li");
   li.dataset.name = name;
   li.addEventListener("click", () => selectContact(name));
@@ -102,7 +119,9 @@ function ensureContact(name: string, alias?: string) {
 
 function updateHeader() {
   if (!current) return;
-  $("#conv-header").textContent = `🔒 ${contactLabel(current)} · @${current}`;
+  const status = contacts.get(current)?.status ?? "offline";
+  $("#conv-header").textContent =
+    `🔒 ${contactLabel(current)} · @${current} · ${t(`status.${status}`)}`;
 }
 
 async function selectContact(name: string) {
@@ -133,8 +152,8 @@ async function selectContact(name: string) {
       for (const m of contact.messages) if (!seen.has(m.id)) restored.push(m);
       contact.messages = restored;
       contact.loaded = true;
-    } catch (err) {
-      toast(`No se pudo cargar el historial: ${err}`);
+    } catch (e) {
+      toast(`${t("error.historyFailed")}: ${tError(e)}`);
     }
   }
   renderMessages();
@@ -151,8 +170,7 @@ function renderMessages() {
     if (msg.kind === "image") {
       const img = document.createElement("img");
       img.src = msg.text;
-      img.alt = "Imagen";
-      img.title = "Clic para ampliar";
+      img.alt = "";
       img.addEventListener("click", () => openLightbox(msg.text));
       div.classList.add("image");
       div.appendChild(img);
@@ -177,18 +195,44 @@ function addMessage(contact: string, msg: Message) {
   }
 }
 
+// ---- Presencia ----
+
+async function refreshPresence() {
+  if (contacts.size === 0) return;
+  try {
+    const presence = await invoke<[string, string][]>("get_presence");
+    for (const [username, status] of presence) {
+      const contact = contacts.get(username);
+      if (contact && contact.status !== status) {
+        contact.status = status;
+        renderContactItem(username);
+        if (current === username) updateHeader();
+      }
+    }
+  } catch {
+    // Transient: the next poll will catch up.
+  }
+}
+
+function renderMyStatus() {
+  $("#me-dot").className = `dot status-${myStatus}`;
+  $("#me-dot").title = t(`status.${myStatus}`);
+}
+
 // ---- Sesión ----
 
 async function enterChat(profile: ProfileInfo) {
   me = profile.username;
   myAlias = profile.alias || me;
+  myStatus = profile.status || "online";
   $("#me-alias").textContent = myAlias;
   $("#me-name").textContent = `@${me}`;
+  renderMyStatus();
   try {
     await invoke("connect");
-  } catch (err) {
+  } catch (e) {
     show("login");
-    toast(`No se pudo conectar: ${err}`);
+    toast(tError(e));
     return;
   }
   try {
@@ -198,7 +242,28 @@ async function enterChat(profile: ProfileInfo) {
     /* sin contactos aún */
   }
   show("chat");
+  refreshPresence();
+  setInterval(refreshPresence, PRESENCE_POLL_MS);
 }
+
+async function boot() {
+  populateServers();
+  populateLanguages();
+  populateStatuses();
+  applyTranslations();
+  try {
+    const profile = await invoke<ProfileInfo | null>("load_profile");
+    if (profile) {
+      await enterChat(profile);
+      return;
+    }
+  } catch (e) {
+    toast(tError(e));
+  }
+  show("login");
+}
+
+// ---- Selectores ----
 
 function populateServers() {
   for (const [selectId, urlId] of [
@@ -219,19 +284,156 @@ function populateServers() {
   }
 }
 
-async function boot() {
-  populateServers();
-  try {
-    const profile = await invoke<ProfileInfo | null>("load_profile");
-    if (profile) {
-      await enterChat(profile);
-      return;
+function populateLanguages() {
+  for (const id of ["#lang-input", "#settings-lang"]) {
+    const select = $(id) as HTMLSelectElement;
+    select.replaceChildren();
+    for (const language of LANGUAGES) {
+      const option = document.createElement("option");
+      option.value = language.code;
+      option.textContent = language.name;
+      select.appendChild(option);
     }
-  } catch (err) {
-    toast(String(err));
+    select.value = lang();
   }
-  show("login");
 }
+
+function populateStatuses() {
+  const select = $("#settings-status") as HTMLSelectElement;
+  select.replaceChildren();
+  for (const status of SETTABLE_STATUSES) {
+    const option = document.createElement("option");
+    option.value = status;
+    option.textContent = t(`status.${status}`);
+    select.appendChild(option);
+  }
+}
+
+/// Re-renders every piece of text after a language change.
+function refreshLanguage(next: Lang) {
+  setLang(next);
+  applyTranslations();
+  populateStatuses();
+  ($("#settings-status") as HTMLSelectElement).value = myStatus;
+  for (const id of ["#lang-input", "#settings-lang"]) {
+    ($(id) as HTMLSelectElement).value = next;
+  }
+  for (const name of contacts.keys()) renderContactItem(name);
+  renderMyStatus();
+  if (current) updateHeader();
+}
+
+$("#lang-input").addEventListener("change", (e) =>
+  refreshLanguage((e.target as HTMLSelectElement).value as Lang),
+);
+$("#settings-lang").addEventListener("change", (e) =>
+  refreshLanguage((e.target as HTMLSelectElement).value as Lang),
+);
+
+// ---- Ajustes ----
+
+$("#settings-btn").addEventListener("click", () => {
+  ($("#settings-alias") as HTMLInputElement).value = myAlias;
+  ($("#settings-status") as HTMLSelectElement).value = myStatus;
+  ($("#settings-lang") as HTMLSelectElement).value = lang();
+  $("#settings-error").textContent = "";
+  // The key is only revealed on demand, never just by opening settings.
+  $("#recovery-code").textContent = "••••";
+  $("#recovery-show").textContent = t("recovery.show");
+  recoveryShown = false;
+  $("#settings").classList.remove("hidden");
+});
+
+$("#settings-close").addEventListener("click", () =>
+  $("#settings").classList.add("hidden"),
+);
+
+// ---- Clave de recuperación ----
+
+let recoveryShown = false;
+
+async function recoveryCode(): Promise<string> {
+  return invoke<string>("get_recovery_code");
+}
+
+$("#recovery-show").addEventListener("click", async () => {
+  const label = $("#recovery-code");
+  if (recoveryShown) {
+    label.textContent = "••••";
+    $("#recovery-show").textContent = t("recovery.show");
+    recoveryShown = false;
+    return;
+  }
+  try {
+    label.textContent = await recoveryCode();
+    $("#recovery-show").textContent = t("recovery.hide");
+    recoveryShown = true;
+  } catch (err) {
+    $("#settings-error").textContent = tError(err);
+  }
+});
+
+$("#recovery-copy").addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText(await recoveryCode());
+    toast(t("recovery.copied"));
+  } catch (err) {
+    $("#settings-error").textContent = tError(err);
+  }
+});
+
+$("#restore-btn").addEventListener("click", async () => {
+  const input = $("#restore-input") as HTMLInputElement;
+  const code = input.value.trim();
+  if (!code) return;
+  const btn = $("#restore-btn") as HTMLButtonElement;
+  btn.disabled = true;
+  $("#settings-error").textContent = "";
+  try {
+    const count = await invoke<number>("restore_history", { code });
+    input.value = "";
+    // Restored messages land in the local database; drop the cached
+    // conversations so they are re-read on next open.
+    for (const contact of contacts.values()) {
+      contact.loaded = false;
+      contact.messages = [];
+    }
+    const list = await invoke<[string, string][]>("get_contacts");
+    for (const [username, alias] of list) ensureContact(username, alias);
+    if (current) await selectContact(current);
+    toast(count > 0 ? t("restore.done").replace("{n}", String(count)) : t("restore.empty"));
+    refreshPresence();
+  } catch (err) {
+    $("#settings-error").textContent = tError(err);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+$("#settings-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const alias = ($("#settings-alias") as HTMLInputElement).value.trim();
+  const status = ($("#settings-status") as HTMLSelectElement).value;
+  const btn = $("#settings-save") as HTMLButtonElement;
+  btn.disabled = true;
+  $("#settings-error").textContent = "";
+  try {
+    await invoke("update_me", {
+      alias: alias !== myAlias ? alias : null,
+      status: status !== myStatus ? status : null,
+    });
+    myAlias = alias;
+    myStatus = status;
+    $("#me-alias").textContent = myAlias;
+    renderMyStatus();
+    $("#settings").classList.add("hidden");
+    toast(t("settings.saved"));
+  } catch (err) {
+    $("#settings-error").textContent = tError(err);
+  } finally {
+    btn.disabled = false;
+  }
+});
 
 // ---- Alternar entrar / crear cuenta (login por defecto) ----
 
@@ -256,7 +458,6 @@ $("#login-form").addEventListener("submit", async (e) => {
       alias: ($("#alias-input") as HTMLInputElement).value.trim(),
       email: ($("#email-input") as HTMLInputElement).value.trim(),
       password: ($("#password-input") as HTMLInputElement).value,
-      historyPassphrase: ($("#history-input") as HTMLInputElement).value,
     });
     me = ($("#username-input") as HTMLInputElement).value.trim().toLowerCase();
     myAlias = ($("#alias-input") as HTMLInputElement).value.trim() || me;
@@ -264,7 +465,7 @@ $("#login-form").addEventListener("submit", async (e) => {
     if (devCode) ($("#code-input") as HTMLInputElement).value = devCode;
     $("#code-input").focus();
   } catch (err) {
-    $("#login-error").textContent = String(err);
+    $("#login-error").textContent = tError(err);
   } finally {
     btn.disabled = false;
   }
@@ -283,9 +484,10 @@ $("#verify-form").addEventListener("submit", async (e) => {
       username: me,
       alias: myAlias,
       server: ($("#server-input") as HTMLSelectElement).value,
+      status: "online",
     });
   } catch (err) {
-    $("#verify-error").textContent = String(err);
+    $("#verify-error").textContent = tError(err);
   } finally {
     btn.disabled = false;
   }
@@ -301,11 +503,10 @@ $("#signin-form").addEventListener("submit", async (e) => {
       server: ($("#signin-server-input") as HTMLSelectElement).value,
       username: ($("#signin-username-input") as HTMLInputElement).value.trim().toLowerCase(),
       password: ($("#signin-password-input") as HTMLInputElement).value,
-      historyPassphrase: ($("#signin-history-input") as HTMLInputElement).value,
     });
     await enterChat(profile);
   } catch (err) {
-    $("#signin-error").textContent = String(err);
+    $("#signin-error").textContent = tError(err);
   } finally {
     btn.disabled = false;
   }
@@ -323,8 +524,9 @@ $("#add-contact-form").addEventListener("submit", async (e) => {
     const alias = await invoke<string>("add_contact", { username: name });
     ensureContact(name, alias || name);
     selectContact(name);
+    refreshPresence();
   } catch (err) {
-    toast(`No se pudo añadir a ${name}: ${err}`);
+    toast(`${t("error.addContactFailed")}: ${tError(err)}`);
   }
 });
 
@@ -347,7 +549,7 @@ $("#send-form").addEventListener("submit", async (e) => {
       mine: true,
     });
   } catch (err) {
-    toast(`Error al enviar: ${err}`);
+    toast(`${t("error.sendFailed")}: ${tError(err)}`);
     input.value = text;
   }
 });
@@ -358,6 +560,8 @@ listen<{ id: string; sender: string; kind: string; text: string; created_at: num
     addMessage(payload.sender, { ...payload, mine: false });
   },
 );
+
+listen("hush://disconnected", () => toast(t("error.disconnected")));
 
 // ---- Pegar imágenes ----
 
@@ -376,7 +580,7 @@ document.addEventListener("paste", (e) => {
   reader.onload = () => {
     const dataUrl = reader.result as string;
     if (dataUrl.length > 10 * 1024 * 1024) {
-      toast("La imagen es demasiado grande (máximo ~7 MB)");
+      toast(t("image.tooBig"));
       return;
     }
     pendingImage = dataUrl;
@@ -411,13 +615,11 @@ $("#img-send").addEventListener("click", async () => {
     });
     closeImagePreview();
   } catch (err) {
-    toast(`Error al enviar la imagen: ${err}`);
+    toast(`${t("error.imageFailed")}: ${tError(err)}`);
   } finally {
     btn.disabled = false;
   }
 });
-
-listen("hush://disconnected", () => toast("Conexión con el servidor perdida"));
 
 // ---- Selector de emojis ----
 
@@ -454,7 +656,7 @@ function renderEmojiGrid() {
   if (activeCategory === -1 && emojis.length === 0) {
     const empty = document.createElement("p");
     empty.className = "emoji-empty";
-    empty.textContent = "Aún no has usado emojis";
+    empty.textContent = t("chat.noRecentEmojis");
     grid.appendChild(empty);
     return;
   }
@@ -484,8 +686,8 @@ function renderEmojiTabs() {
     });
     tabs.appendChild(btn);
   };
-  makeTab("🕘", -1, "Recientes");
-  CATEGORIES.forEach((cat, i) => makeTab(cat.icon, i, cat.name));
+  makeTab("🕘", -1, t("chat.recentEmojis"));
+  CATEGORIES.forEach((cat, i) => makeTab(cat.icon, i, t(cat.key)));
 }
 
 function hideEmojiPanel() {
@@ -519,13 +721,13 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
     hideEmojiPanel();
     $("#img-lightbox").classList.add("hidden");
+    $("#settings").classList.add("hidden");
   }
 });
 
 // ---- Menú contextual propio ----
-// The browser menu is suppressed everywhere except text inputs; the app shows
-// its own menu with actions relevant to what was clicked. Shift+right-click
-// bypasses it (handy in dev to reach Inspect).
+// The browser menu is suppressed everywhere; the app shows its own with
+// actions relevant to what was clicked. Shift+right-click bypasses it.
 
 interface CtxItem {
   label: string;
@@ -561,24 +763,31 @@ document.addEventListener("mousedown", (e) => {
   if (!(e.target as HTMLElement).closest("#ctx-menu")) closeContextMenu();
 });
 
+function copyText(text: string) {
+  navigator.clipboard.writeText(text).then(
+    () => toast(t("ctx.copied")),
+    () => toast(t("ctx.copyFailed")),
+  );
+}
+
 async function copyImageToClipboard(dataUrl: string) {
   try {
     const blob = await (await fetch(dataUrl)).blob();
     await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
-    toast("Imagen copiada");
+    toast(t("image.copied"));
   } catch {
-    toast("No se pudo copiar la imagen");
+    toast(t("image.copyFailed"));
   }
 }
 
 document.addEventListener("contextmenu", (e) => {
   if (e.shiftKey) return;
-  const t = e.target as HTMLElement;
+  const target = e.target as HTMLElement;
   e.preventDefault();
 
   // Text fields get the usual editing actions, but rendered by the app.
-  if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement) {
-    const input = t;
+  if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
+    const input = target;
     const hasSelection = input.selectionStart !== input.selectionEnd;
     const selected = () =>
       input.value.slice(input.selectionStart ?? 0, input.selectionEnd ?? 0);
@@ -593,30 +802,30 @@ document.addEventListener("contextmenu", (e) => {
     const items: CtxItem[] = [];
     if (hasSelection) {
       items.push({
-        label: "Cortar",
+        label: t("ctx.cut"),
         action: () => {
           navigator.clipboard.writeText(selected());
           replaceSelection("");
         },
       });
       items.push({
-        label: "Copiar",
+        label: t("ctx.copy"),
         action: () => void navigator.clipboard.writeText(selected()),
       });
     }
     items.push({
-      label: "Pegar",
+      label: t("ctx.paste"),
       action: async () => {
         try {
           replaceSelection(await navigator.clipboard.readText());
         } catch {
-          toast("No se pudo pegar");
+          toast(t("ctx.pasteFailed"));
         }
       },
     });
     if (input.value) {
       items.push({
-        label: "Seleccionar todo",
+        label: t("ctx.selectAll"),
         action: () => {
           input.focus();
           input.select();
@@ -627,14 +836,14 @@ document.addEventListener("contextmenu", (e) => {
     return;
   }
 
-  const bubble = t.closest<HTMLElement>(".bubble");
+  const bubble = target.closest<HTMLElement>(".bubble");
   if (bubble) {
     if (bubble.classList.contains("image")) {
       const src = bubble.querySelector("img")?.src ?? "";
       showContextMenu(
         [
-          { label: "Ver imagen", action: () => openLightbox(src) },
-          { label: "Copiar imagen", action: () => copyImageToClipboard(src) },
+          { label: t("ctx.view"), action: () => openLightbox(src) },
+          { label: t("ctx.copyImage"), action: () => copyImageToClipboard(src) },
         ],
         e.clientX,
         e.clientY,
@@ -642,17 +851,7 @@ document.addEventListener("contextmenu", (e) => {
     } else {
       const text = bubble.textContent ?? "";
       showContextMenu(
-        [
-          {
-            label: "Copiar texto",
-            action: () => {
-              navigator.clipboard.writeText(text).then(
-                () => toast("Texto copiado"),
-                () => toast("No se pudo copiar"),
-              );
-            },
-          },
-        ],
+        [{ label: t("ctx.copyText"), action: () => copyText(text) }],
         e.clientX,
         e.clientY,
       );
@@ -660,21 +859,11 @@ document.addEventListener("contextmenu", (e) => {
     return;
   }
 
-  const contactLi = t.closest<HTMLElement>("#contact-list li");
+  const contactLi = target.closest<HTMLElement>("#contact-list li");
   if (contactLi?.dataset.name) {
     const name = contactLi.dataset.name;
     showContextMenu(
-      [
-        {
-          label: `Copiar @${name}`,
-          action: () => {
-            navigator.clipboard.writeText(name).then(
-              () => toast("Usuario copiado"),
-              () => toast("No se pudo copiar"),
-            );
-          },
-        },
-      ],
+      [{ label: t("ctx.copyUser"), action: () => copyText(name) }],
       e.clientX,
       e.clientY,
     );

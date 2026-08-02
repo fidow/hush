@@ -204,6 +204,27 @@ impl LocalDb {
         })
     }
 
+    /// Every stored message, used to re-upload the archive under a new key.
+    pub fn all_messages(&self) -> Result<Vec<StoredMessage>> {
+        self.with(|c| {
+            c.prepare(
+                "SELECT id, contact, mine, kind, text, created_at FROM messages
+                 ORDER BY created_at",
+            )?
+            .query_map([], |r| {
+                Ok(StoredMessage {
+                    id: r.get(0)?,
+                    contact: r.get(1)?,
+                    mine: r.get::<_, i64>(2)? != 0,
+                    kind: r.get(3)?,
+                    text: r.get(4)?,
+                    created_at: r.get(5)?,
+                })
+            })?
+            .collect()
+        })
+    }
+
     pub fn history(&self, contact: &str) -> Result<Vec<StoredMessage>> {
         self.with(|c| {
             c.prepare(

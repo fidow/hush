@@ -3,26 +3,27 @@
 //! Message history cannot be handed to a new device by the server without
 //! breaking end-to-end encryption, so instead each device re-encrypts every
 //! message it sends or receives under a key only the user holds, and uploads
-//! the result. Signing in on a new device and supplying the history
-//! passphrase restores the full conversation; the server only ever sees
-//! opaque blobs.
+//! the result. Restoring elsewhere needs nothing but the recovery key.
 //!
-//! - Key: Argon2id(passphrase, per-account salt) → 32 bytes.
-//! - Entry: XChaCha20-Poly1305, blob = base64(nonce ‖ ciphertext).
-//!
-//! Both primitives are symmetric, so this layer is already quantum-resistant
-//! (Grover only halves the effective key size, leaving 128-bit security).
+//! The key is 32 random bytes generated on the device at registration — not
+//! derived from a passphrase, so it cannot be weak or guessed — shown to the
+//! user on request as a grouped base32 code. Entries are sealed with
+//! XChaCha20-Poly1305, which is symmetric and therefore already
+//! quantum-resistant (Grover only halves the effective key size).
 
 use anyhow::{anyhow, bail, Context, Result};
-use argon2::Argon2;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
+use data_encoding::BASE32_NOPAD;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
 use crate::db::StoredMessage;
+
+/// Characters per group in the printed recovery code.
+const GROUP: usize = 4;
 
 /// One archived message, as stored inside the encrypted blob.
 #[derive(Serialize, Deserialize)]
@@ -66,28 +67,48 @@ impl From<ArchiveEntry> for StoredMessage {
 pub struct ArchiveKey([u8; 32]);
 
 impl ArchiveKey {
-    /// Derives the key from the user's history passphrase and the salt the
-    /// server keeps for the account.
-    pub fn derive(passphrase: &str, salt_b64: &str) -> Result<Self> {
-        let salt = B64
-            .decode(salt_b64)
-            .context("la sal del historial no es válida")?;
-        if salt.len() < 8 {
-            bail!("la sal del historial no es válida");
-        }
+    /// A fresh key for a new account.
+    pub fn generate() -> Self {
         let mut key = [0u8; 32];
-        Argon2::default()
-            .hash_password_into(passphrase.as_bytes(), &salt, &mut key)
-            .map_err(|e| anyhow!("no se pudo derivar la clave de historial: {e}"))?;
+        crate::engine::os_rng().fill_bytes(&mut key);
+        Self(key)
+    }
+
+    /// The key as the user sees it: uppercase base32 in dash-separated
+    /// groups, an alphabet without lowercase so it survives being written
+    /// down and retyped.
+    pub fn to_recovery_code(&self) -> String {
+        let encoded = BASE32_NOPAD.encode(&self.0);
+        encoded
+            .as_bytes()
+            .chunks(GROUP)
+            .map(|c| std::str::from_utf8(c).expect("base32 is ascii"))
+            .collect::<Vec<_>>()
+            .join("-")
+    }
+
+    /// Parses a recovery code, ignoring dashes, spaces and letter case.
+    pub fn from_recovery_code(code: &str) -> Result<Self> {
+        let cleaned: String = code
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .map(|c| c.to_ascii_uppercase())
+            .collect();
+        let bytes = BASE32_NOPAD
+            .decode(cleaned.as_bytes())
+            .context("invalid_recovery_key")?;
+        let key: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| anyhow!("invalid_recovery_key"))?;
         Ok(Self(key))
     }
 
     /// Restores a key previously saved on this device.
     pub fn from_b64(raw: &str) -> Result<Self> {
-        let bytes = B64.decode(raw).context("clave de historial corrupta")?;
+        let bytes = B64.decode(raw).context("invalid_recovery_key")?;
         let key: [u8; 32] = bytes
             .try_into()
-            .map_err(|_| anyhow!("clave de historial corrupta"))?;
+            .map_err(|_| anyhow!("invalid_recovery_key"))?;
         Ok(Self(key))
     }
 
@@ -107,31 +128,24 @@ impl ArchiveKey {
         let ciphertext = self
             .cipher()
             .encrypt(nonce, plaintext.as_slice())
-            .map_err(|_| anyhow!("no se pudo cifrar la entrada de historial"))?;
+            .map_err(|_| anyhow!("cannot encrypt history entry"))?;
         let mut blob = nonce_bytes.to_vec();
         blob.extend_from_slice(&ciphertext);
         Ok(B64.encode(blob))
     }
 
     pub fn decrypt_entry(&self, blob: &str) -> Result<ArchiveEntry> {
-        let raw = B64.decode(blob).context("entrada de historial corrupta")?;
+        let raw = B64.decode(blob).context("corrupt history entry")?;
         if raw.len() < 24 {
-            bail!("entrada de historial corrupta");
+            bail!("corrupt history entry");
         }
         let (nonce_bytes, ciphertext) = raw.split_at(24);
         let plaintext = self
             .cipher()
             .decrypt(XNonce::from_slice(nonce_bytes), ciphertext)
-            .map_err(|_| anyhow!("frase de historial incorrecta"))?;
+            .map_err(|_| anyhow!("wrong_recovery_key"))?;
         Ok(serde_json::from_slice(&plaintext)?)
     }
-}
-
-/// A fresh random salt for a new account, base64-encoded.
-pub fn new_salt() -> String {
-    let mut salt = [0u8; 16];
-    crate::engine::os_rng().fill_bytes(&mut salt);
-    B64.encode(salt)
 }
 
 #[cfg(test)]
@@ -150,25 +164,31 @@ mod tests {
     }
 
     #[test]
-    fn roundtrip_with_right_passphrase() {
-        let salt = new_salt();
-        let key = ArchiveKey::derive("frase de historial", &salt).unwrap();
+    fn roundtrip_through_the_recovery_code() {
+        let key = ArchiveKey::generate();
         let blob = key.encrypt_entry(&entry()).unwrap();
         assert!(!blob.contains("hola"), "el blob no debe filtrar el mensaje");
 
-        // A different device deriving the same key can read it back.
-        let same = ArchiveKey::derive("frase de historial", &salt).unwrap();
-        assert_eq!(same.decrypt_entry(&blob).unwrap().text, "hola bob");
+        // Another device restores from the printed code alone.
+        let code = key.to_recovery_code();
+        let restored = ArchiveKey::from_recovery_code(&code).unwrap();
+        assert_eq!(restored.decrypt_entry(&blob).unwrap().text, "hola bob");
     }
 
     #[test]
-    fn wrong_passphrase_fails() {
-        let salt = new_salt();
-        let blob = ArchiveKey::derive("correcta", &salt)
-            .unwrap()
-            .encrypt_entry(&entry())
-            .unwrap();
-        let wrong = ArchiveKey::derive("incorrecta", &salt).unwrap();
-        assert!(wrong.decrypt_entry(&blob).is_err());
+    fn codes_survive_retyping() {
+        let code = ArchiveKey::generate().to_recovery_code();
+        let messy = format!(" {} ", code.to_lowercase().replace('-', " "));
+        assert_eq!(
+            ArchiveKey::from_recovery_code(&messy).unwrap().to_b64(),
+            ArchiveKey::from_recovery_code(&code).unwrap().to_b64()
+        );
+    }
+
+    #[test]
+    fn wrong_key_cannot_read_the_archive() {
+        let blob = ArchiveKey::generate().encrypt_entry(&entry()).unwrap();
+        assert!(ArchiveKey::generate().decrypt_entry(&blob).is_err());
+        assert!(ArchiveKey::from_recovery_code("not-a-key").is_err());
     }
 }

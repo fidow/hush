@@ -2325,12 +2325,12 @@ name = "hush-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "argon2",
  "async-trait",
  "axum",
  "base64 0.22.1",
  "bytes",
  "chacha20poly1305",
+ "data-encoding",
  "futures-util",
  "hush-server",
  "libsignal-protocol",

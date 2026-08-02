@@ -39,7 +39,6 @@ async fn onboard(base: &str, pool: &sqlx::SqlitePool, username: &str) -> (Engine
         &format!("Alias de {username}"),
         &format!("{username}@example.com"),
         "supersecreta",
-        &hush_core::archive::new_salt(),
         engine.registration_id().await.unwrap(),
         &engine.identity_key_b64().await.unwrap(),
     )
@@ -62,8 +61,9 @@ async fn recv_one(
         .expect("stream closed")
 }
 
-/// Signing in on a second device restores the conversation history from the
-/// encrypted archive, and only with the right history passphrase.
+/// A second device restores the conversation history from the encrypted
+/// archive with the recovery key, and only with the right one. Restoring is
+/// available at any time, not only while signing in.
 #[tokio::test]
 async fn history_follows_the_user_to_a_new_device() {
     use hush_core::HushClient;
@@ -73,15 +73,15 @@ async fn history_follows_the_user_to_a_new_device() {
 
     // Bob exists so Alice has someone to talk to.
     let bob = HushClient::spawn(dir.join("bob.db"));
-    bob.register(&base, "bob", "Roberto", "bob@example.com", "supersecreta", "frase-de-bob")
+    bob.register(&base, "bob", "Roberto", "bob@example.com", "supersecreta")
         .await
         .unwrap();
     bob.verify(&pending_code(&pool, "bob").await).await.unwrap();
 
-    // Alice's first device sends a message.
+    // Alice's first device sends a message and reads its recovery key.
     let device1 = HushClient::spawn(dir.join("device1.db"));
     device1
-        .register(&base, "alice", "Alicia", "alice@example.com", "supersecreta", "frase-de-alice")
+        .register(&base, "alice", "Alicia", "alice@example.com", "supersecreta")
         .await
         .unwrap();
     device1
@@ -90,29 +90,38 @@ async fn history_follows_the_user_to_a_new_device() {
         .unwrap();
     device1.connect().await.unwrap();
     device1.send_text("bob", "mensaje que debe sobrevivir").await.unwrap();
+    let recovery = device1.recovery_code().await.unwrap();
+    assert!(recovery.contains('-'), "code is grouped for reading: {recovery}");
 
-    // A second device with the wrong passphrase is rejected...
-    let wrong = HushClient::spawn(dir.join("wrong.db"));
-    let err = wrong
-        .login(&base, "alice", "supersecreta", "frase-equivocada")
-        .await
-        .unwrap_err();
-    assert!(err.contains("historial"), "unexpected error: {err}");
-
-    // ...and with the right one the history comes back.
+    // The second device signs in with no history, then restores it.
     let device2 = HushClient::spawn(dir.join("device2.db"));
-    device2
-        .login(&base, "alice", "supersecreta", "frase-de-alice")
+    device2.login(&base, "alice", "supersecreta").await.unwrap();
+    assert!(device2.history("bob").await.unwrap().is_empty());
+
+    // Somebody else's key cannot read the archive.
+    let other = HushClient::spawn(dir.join("other.db"));
+    other
+        .register(&base, "mallory", "M", "m@example.com", "supersecreta")
         .await
         .unwrap();
+    other
+        .verify(&pending_code(&pool, "mallory").await)
+        .await
+        .unwrap();
+    let err = device2
+        .restore_history(&other.recovery_code().await.unwrap())
+        .await
+        .unwrap_err();
+    assert_eq!(err, "wrong_recovery_key");
+
+    // With the real key the conversation comes back.
+    let restored = device2.restore_history(&recovery).await.unwrap();
+    assert_eq!(restored, 1);
     let history = device2.history("bob").await.unwrap();
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].text, "mensaje que debe sobrevivir");
     assert!(history[0].mine);
-
-    // The contact list is restored too.
-    let contacts = device2.contacts().await.unwrap();
-    assert!(contacts.iter().any(|(u, _)| u == "bob"));
+    assert!(device2.contacts().await.unwrap().iter().any(|(u, _)| u == "bob"));
 }
 
 #[tokio::test]

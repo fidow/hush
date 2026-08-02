@@ -1,7 +1,8 @@
 // Curated emoji set for the in-app picker, grouped like a mobile keyboard.
 
 export interface EmojiCategory {
-  name: string;
+  /// i18n key for the category name shown as the tab tooltip.
+  key: string;
   icon: string;
   emojis: string[];
 }
@@ -11,7 +12,7 @@ export const MAX_RECENT = 24;
 
 export const CATEGORIES: EmojiCategory[] = [
   {
-    name: "Caritas",
+    key: "emoji.smileys",
     icon: "😀",
     emojis: [
       "😀","😃","😄","😁","😆","😅","😂","🤣","😊","😇","🙂","🙃","😉","😌","😍","🥰",
@@ -23,7 +24,7 @@ export const CATEGORIES: EmojiCategory[] = [
     ],
   },
   {
-    name: "Gestos",
+    key: "emoji.gestures",
     icon: "👋",
     emojis: [
       "👋","🤚","🖐️","✋","🖖","👌","🤌","🤏","✌️","🤞","🫰","🤟","🤘","🤙","👈","👉",
@@ -33,7 +34,7 @@ export const CATEGORIES: EmojiCategory[] = [
     ],
   },
   {
-    name: "Animales",
+    key: "emoji.animals",
     icon: "🐱",
     emojis: [
       "🐶","🐱","🐭","🐹","🐰","🦊","🐻","🐼","🐻‍❄️","🐨","🐯","🦁","🐮","🐷","🐸","🐵",
@@ -43,7 +44,7 @@ export const CATEGORIES: EmojiCategory[] = [
     ],
   },
   {
-    name: "Comida",
+    key: "emoji.food",
     icon: "🍕",
     emojis: [
       "🍏","🍎","🍐","🍊","🍋","🍌","🍉","🍇","🍓","🫐","🍈","🍒","🍑","🥭","🍍","🥥",
@@ -56,7 +57,7 @@ export const CATEGORIES: EmojiCategory[] = [
     ],
   },
   {
-    name: "Actividades",
+    key: "emoji.activities",
     icon: "⚽",
     emojis: [
       "⚽","🏀","🏈","⚾","🥎","🎾","🏐","🏉","🥏","🎱","🪀","🏓","🏸","🏒","🏑","🥍",
@@ -67,7 +68,7 @@ export const CATEGORIES: EmojiCategory[] = [
     ],
   },
   {
-    name: "Objetos",
+    key: "emoji.objects",
     icon: "💡",
     emojis: [
       "⌚","📱","💻","⌨️","🖥️","🖨️","🖱️","🕹️","🗜️","💽","💾","💿","📀","📼","📷","📸",
@@ -79,7 +80,7 @@ export const CATEGORIES: EmojiCategory[] = [
     ],
   },
   {
-    name: "Símbolos",
+    key: "emoji.symbols",
     icon: "❤️",
     emojis: [
       "✅","❌","❓","❗","‼️","⁉️","💤","🔞","⚠️","🚸","🔱","⚜️","🔰","♻️","✳️","❇️",
