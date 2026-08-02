@@ -419,6 +419,8 @@ impl Actor {
         let restored = self.restore_archive(&key).await?;
         self.db.meta_set("archive_key", &key.to_b64())?;
         self.archive_key = Some(key);
+        // Back-fill: anything this device holds but never archived (because
+        // it had no key) goes up now.
         for msg in self.db.all_messages()? {
             self.archive_message(&msg).await;
         }
@@ -495,17 +497,18 @@ impl Actor {
         self.db.save_profile(&profile)?;
         self.session = Some(Session { engine, api });
 
-        // A device with no key yet gets one, so messages from now on are
-        // archived; the user restores older history from settings with the
-        // recovery code of their other device.
-        self.archive_key = Some(match self.db.meta_get("archive_key")? {
-            Some(stored) => ArchiveKey::from_b64(&stored)?,
+        // The recovery key belongs to the *account*, not the device: it is
+        // created once at registration. A device that doesn't hold it yet
+        // archives nothing, because entries written under a second key would
+        // be unreadable with the key the user actually kept. Restoring with
+        // the real code adopts it and back-fills anything received meanwhile.
+        self.archive_key = match self.db.meta_get("archive_key")? {
+            Some(stored) => Some(ArchiveKey::from_b64(&stored)?),
             None => {
-                let key = ArchiveKey::generate();
-                self.db.meta_set("archive_key", &key.to_b64())?;
-                key
+                tracing::info!("no recovery key on this device; history archiving is paused");
+                None
             }
-        });
+        };
 
         Ok(ProfileInfo {
             username: profile.username,

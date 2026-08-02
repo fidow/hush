@@ -538,6 +538,13 @@ button.secondary {
   min-height: 4.6rem;
 }
 
+.recovery-code.recovery-missing {
+  font-family: inherit;
+  font-size: 0.85rem;
+  letter-spacing: normal;
+  color: var(--muted);
+}
+
 .icon-btn {
   background: transparent;
   margin-left: auto;

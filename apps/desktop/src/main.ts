@@ -339,6 +339,7 @@ $("#settings-btn").addEventListener("click", () => {
   $("#settings-error").textContent = "";
   // The key is only revealed on demand, never just by opening settings.
   $("#recovery-code").textContent = HIDDEN_KEY;
+  $("#recovery-code").classList.remove("recovery-missing");
   $("#recovery-show").textContent = t("recovery.show");
   recoveryShown = false;
   $("#settings").classList.remove("hidden");
@@ -367,10 +368,14 @@ $("#recovery-show").addEventListener("click", async () => {
   }
   try {
     label.textContent = await recoveryCode();
+    label.classList.remove("recovery-missing");
     $("#recovery-show").textContent = t("recovery.hide");
     recoveryShown = true;
   } catch (err) {
-    $("#settings-error").textContent = tError(err);
+    // Typically `no_recovery_key`: this device has not adopted the account's
+    // key yet, which the restore box right below fixes.
+    label.textContent = tError(err);
+    label.classList.add("recovery-missing");
   }
 });
 

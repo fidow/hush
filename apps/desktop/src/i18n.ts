@@ -138,7 +138,8 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "err.no_session": "No has iniciado sesión",
     "err.wrong_recovery_key": "Esa clave de recuperación no es la de esta cuenta",
     "err.invalid_recovery_key": "La clave de recuperación no tiene un formato válido",
-    "err.no_recovery_key": "Este dispositivo aún no tiene clave de recuperación",
+    "err.no_recovery_key":
+      "Este dispositivo aún no tiene la clave de la cuenta. Recupérala aquí abajo con la clave de tu otro dispositivo.",
   },
   en: {
     "app.tagline": "Private messaging with post-quantum encryption",
@@ -266,7 +267,8 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "err.no_session": "You are not signed in",
     "err.wrong_recovery_key": "That recovery key does not belong to this account",
     "err.invalid_recovery_key": "That recovery key is not in a valid format",
-    "err.no_recovery_key": "This device has no recovery key yet",
+    "err.no_recovery_key":
+      "This device doesn't hold the account key yet. Restore it below using the key from your other device.",
   },
 };
 

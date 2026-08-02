@@ -93,10 +93,16 @@ async fn history_follows_the_user_to_a_new_device() {
     let recovery = device1.recovery_code().await.unwrap();
     assert!(recovery.contains('-'), "code is grouped for reading: {recovery}");
 
-    // The second device signs in with no history, then restores it.
+    // The second device signs in with no history and, crucially, no key of
+    // its own: the recovery key belongs to the account, not the device.
     let device2 = HushClient::spawn(dir.join("device2.db"));
     device2.login(&base, "alice", "supersecreta").await.unwrap();
     assert!(device2.history("bob").await.unwrap().is_empty());
+    assert_eq!(
+        device2.recovery_code().await.unwrap_err(),
+        "no_recovery_key",
+        "a fresh device must not invent a second key"
+    );
 
     // Somebody else's key cannot read the archive.
     let other = HushClient::spawn(dir.join("other.db"));
@@ -122,6 +128,25 @@ async fn history_follows_the_user_to_a_new_device() {
     assert_eq!(history[0].text, "mensaje que debe sobrevivir");
     assert!(history[0].mine);
     assert!(device2.contacts().await.unwrap().iter().any(|(u, _)| u == "bob"));
+
+    // Both devices now report the same key, and messages sent from the second
+    // one land in the same archive.
+    assert_eq!(device2.recovery_code().await.unwrap(), recovery);
+    device2.connect().await.unwrap();
+    device2.send_text("bob", "desde el segundo dispositivo").await.unwrap();
+
+    let device3 = HushClient::spawn(dir.join("device3.db"));
+    device3.login(&base, "alice", "supersecreta").await.unwrap();
+    assert_eq!(device3.restore_history(&recovery).await.unwrap(), 2);
+    let texts: Vec<String> = device3
+        .history("bob")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|m| m.text)
+        .collect();
+    assert!(texts.contains(&"mensaje que debe sobrevivir".to_string()));
+    assert!(texts.contains(&"desde el segundo dispositivo".to_string()));
 }
 
 #[tokio::test]
