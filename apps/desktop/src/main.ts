@@ -1,6 +1,7 @@
 /// <reference types="vite/client" />
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { CATEGORIES, MAX_RECENT, RECENT_KEY } from "./emoji";
 import { applyTranslations, LANGUAGES, lang, setLang, t, tError, type Lang } from "./i18n";
@@ -101,6 +102,7 @@ getCurrentWindow()
   .catch(() => {});
 let me = "";
 let myAlias = "";
+let myServer = "";
 let myStatus = "online";
 let current: string | null = null;
 
@@ -528,6 +530,7 @@ function onDisconnected() {
 async function enterChat(profile: ProfileInfo) {
   me = profile.username;
   myAlias = profile.alias || me;
+  myServer = profile.server;
   myStatus = profile.status || "online";
   $("#me-alias").textContent = myAlias;
   $("#me-name").textContent = `@${me}`;
@@ -737,6 +740,7 @@ $("#settings-btn").addEventListener("click", () => {
   ($("#settings-alias") as HTMLInputElement).value = myAlias;
   ($("#settings-status") as HTMLSelectElement).value = myStatus;
   ($("#settings-lang") as HTMLSelectElement).value = lang();
+  void fillAbout();
   ($("#settings-notifications") as HTMLInputElement).checked = notificationsEnabled();
   ($("#settings-sound") as HTMLInputElement).checked = soundEnabled();
   $("#settings-error").textContent = "";
@@ -751,6 +755,16 @@ $("#settings-btn").addEventListener("click", () => {
 $("#settings-close").addEventListener("click", () =>
   $("#settings").classList.add("hidden"),
 );
+
+/// Fills the "about" block. The encryption details live here rather than
+/// being repeated across the interface.
+async function fillAbout() {
+  $("#about-version").textContent = await getVersion().catch(() => "—");
+  $("#about-account").textContent = me ? `${myAlias} (@${me})` : "—";
+  const server = SERVERS.find((s) => s.url === myServer);
+  $("#about-server").textContent = server ? server.name : myServer || "—";
+  $("#about-encryption").textContent = "PQXDH · X25519 + Kyber-1024 · Double Ratchet";
+}
 
 // Alert switches apply immediately; the sound one previews itself so the
 // user hears what they just turned on.

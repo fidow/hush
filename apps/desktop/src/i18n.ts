@@ -61,7 +61,7 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "contacts.nowContacts": "Ya sois contactos",
     "contacts.remove": "Eliminar contacto",
     "chat.pickContact": "Selecciona un contacto",
-    "chat.messagePlaceholder": "Escribe un mensaje cifrado…",
+    "chat.messagePlaceholder": "Escribe un mensaje…",
     "chat.send": "Enviar",
     "chat.emojis": "Emojis",
     "chat.settings": "Ajustes",
@@ -95,7 +95,7 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "settings.saved": "Ajustes guardados",
     "empty.pickTitle": "Ninguna conversación abierta",
     "empty.pickNote":
-      "Elige un contacto de la lista para leer y escribir. Todo lo que envíes va cifrado de extremo a extremo.",
+      "Elige un contacto de la lista para leer y escribir.",
     "empty.noContactsTitle": "Todavía no tienes contactos",
     "empty.noContactsNote":
       "Escribe un nombre de usuario arriba a la izquierda para enviarle una solicitud. Podréis hablar cuando la acepte.",
@@ -116,6 +116,15 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "notify.image": "📷 Te ha enviado una imagen",
     "notify.requestTitle": "Nueva solicitud de contacto",
     "notify.requestBody": "{who} quiere añadirte",
+
+    "about.title": "Acerca de Hush",
+    "about.version": "Versión",
+    "about.account": "Cuenta",
+    "about.server": "Servidor",
+    "about.encryption": "Cifrado",
+    "about.license": "Licencia",
+    "about.note":
+      "Los mensajes van cifrados de extremo a extremo: el servidor solo transporta datos que no puede leer. El intercambio de claves es resistente a computación cuántica.",
 
     "recovery.title": "Clave de recuperación",
     "recovery.note":
@@ -252,7 +261,7 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "contacts.nowContacts": "You are now contacts",
     "contacts.remove": "Remove contact",
     "chat.pickContact": "Pick a contact",
-    "chat.messagePlaceholder": "Write an encrypted message…",
+    "chat.messagePlaceholder": "Write a message…",
     "chat.send": "Send",
     "chat.emojis": "Emojis",
     "chat.settings": "Settings",
@@ -286,7 +295,7 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "settings.saved": "Settings saved",
     "empty.pickTitle": "No conversation open",
     "empty.pickNote":
-      "Pick a contact from the list to read and write. Everything you send is end-to-end encrypted.",
+      "Pick a contact from the list to read and write.",
     "empty.noContactsTitle": "No contacts yet",
     "empty.noContactsNote":
       "Type a username in the box on the left to send a request. You can talk once they accept.",
@@ -307,6 +316,15 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "notify.image": "📷 Sent you an image",
     "notify.requestTitle": "New contact request",
     "notify.requestBody": "{who} wants to add you",
+
+    "about.title": "About Hush",
+    "about.version": "Version",
+    "about.account": "Account",
+    "about.server": "Server",
+    "about.encryption": "Encryption",
+    "about.license": "Licence",
+    "about.note":
+      "Messages are end-to-end encrypted: the server only carries data it cannot read. The key exchange is quantum-resistant.",
 
     "recovery.title": "Recovery key",
     "recovery.note":
