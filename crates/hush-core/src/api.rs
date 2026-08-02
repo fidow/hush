@@ -25,6 +25,9 @@ pub struct ContactEntry {
     /// "incoming", "outgoing" or "accepted".
     pub state: String,
     pub status: String,
+    /// When they were last connected, in epoch millis. Only set while they
+    /// are offline.
+    pub last_seen: Option<i64>,
 }
 
 /// Anything the server pushes down the stream.
@@ -324,6 +327,7 @@ impl ApiClient {
                         alias: c["alias"].as_str().unwrap_or_default().to_string(),
                         state: c["state"].as_str().unwrap_or("accepted").to_string(),
                         status: c["status"].as_str().unwrap_or("offline").to_string(),
+                        last_seen: c["last_seen"].as_i64(),
                     })
                     .collect()
             })

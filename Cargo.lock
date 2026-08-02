@@ -2359,6 +2359,7 @@ dependencies = [
  "tauri-plugin-notification",
  "tauri-plugin-opener",
  "tokio",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

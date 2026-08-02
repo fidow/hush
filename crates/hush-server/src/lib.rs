@@ -57,6 +57,9 @@ CREATE TABLE IF NOT EXISTS accounts (
     -- Presence the user picked; whether they are reachable at all is derived
     -- from the live SSE connections, not from this column.
     status          TEXT NOT NULL DEFAULT 'online',
+    -- When the account last held an open stream, for "last seen" on
+    -- contacts who are offline.
+    last_seen       INTEGER,
     verify_attempts INTEGER NOT NULL DEFAULT 0,
     reset_code      TEXT,
     reset_expires   INTEGER,
@@ -152,6 +155,7 @@ pub async fn connect_db(url: &str) -> anyhow::Result<SqlitePool> {
         "reset_code TEXT",
         "reset_expires INTEGER",
         "reset_attempts INTEGER NOT NULL DEFAULT 0",
+        "last_seen INTEGER",
     ] {
         let _ = sqlx::query(&format!("ALTER TABLE accounts ADD COLUMN {column}"))
             .execute(&pool)
@@ -899,6 +903,16 @@ async fn notify_contacts_changed(state: &AppState, username: &str) {
     }
 }
 
+/// Records that the account was connected at this instant, so a contact who
+/// is offline can still be shown when they were last around.
+async fn touch_last_seen(db: &SqlitePool, username: &str) {
+    let _ = sqlx::query("UPDATE accounts SET last_seen = ? WHERE username = ?")
+        .bind(now())
+        .bind(username)
+        .execute(db)
+        .await;
+}
+
 /// Nudges everyone who has `username` as an accepted contact. Used whenever
 /// something they can see changes — presence, display name, connecting or
 /// disconnecting — so their list updates at once instead of at the next poll.
@@ -956,7 +970,7 @@ async fn list_contacts(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let rows = sqlx::query(
-        "SELECT c.peer, c.state, a.alias, a.status
+        "SELECT c.peer, c.state, a.alias, a.status, a.last_seen
          FROM contacts c JOIN accounts a ON a.username = c.peer
          WHERE c.owner = ? ORDER BY c.created_at",
     )
@@ -976,6 +990,8 @@ async fn list_contacts(
                 "state": r.get::<String, _>(1),
                 "alias": r.get::<String, _>(2),
                 "status": if connected { r.get::<String, _>(3) } else { "offline".into() },
+                // Only meaningful while they are away.
+                "last_seen": if connected { None } else { r.get::<Option<i64>, _>(4) },
             })
         })
         .collect();
@@ -1356,6 +1372,7 @@ async fn message_stream(
         id: listener_id,
     };
     // Coming online is a presence change for everyone watching.
+    touch_last_seen(&state.db, &auth.username).await;
     notify_watchers(&state.db, &state.live, &auth.username).await;
 
     // Backlog first, then live pushes. Clients dedupe by message id: a message
@@ -1418,8 +1435,10 @@ impl Drop for LiveGuard {
                 }
                 mine
             };
-            // Going offline is a presence change too.
+            // Going offline is a presence change too, and fixes the moment
+            // the contact was last around.
             if removed {
+                touch_last_seen(&db, &username).await;
                 notify_watchers(&db, &live, &username).await;
             }
         });

@@ -42,12 +42,14 @@ interface ContactEntry {
   alias: string;
   state: "incoming" | "outgoing" | "accepted";
   status: string;
+  last_seen: number | null;
 }
 
 interface Contact {
   alias: string;
   state: string;
   status: string;
+  lastSeen: number | null;
   messages: Message[];
   loaded: boolean;
 }
@@ -137,7 +139,7 @@ function contactItem(name: string, contact: Contact): HTMLElement {
 
   const dot = document.createElement("span");
   dot.className = `dot status-${contact.status}`;
-  dot.title = t(`status.${contact.status}`);
+  dot.title = presenceLabel(contact);
 
   const names = document.createElement("div");
   names.className = "contact-names";
@@ -197,11 +199,13 @@ async function refreshContacts() {
         existing.alias = entry.alias;
         existing.state = entry.state;
         existing.status = entry.status;
+        existing.lastSeen = entry.last_seen;
       } else {
         contacts.set(entry.username, {
           alias: entry.alias,
           state: entry.state,
           status: entry.status,
+          lastSeen: entry.last_seen,
           messages: [],
           loaded: false,
         });
@@ -228,11 +232,43 @@ function closeConversation() {
   $("#messages").replaceChildren();
 }
 
+/// "hace 5 minutos" / "5 minutes ago", in the active language.
+function relativeTime(timestamp: number): string {
+  const seconds = Math.round((timestamp - Date.now()) / 1000);
+  const units: [Intl.RelativeTimeFormatUnit, number][] = [
+    ["second", 60],
+    ["minute", 60],
+    ["hour", 24],
+    ["day", 7],
+    ["week", 4.35],
+    ["month", 12],
+    ["year", Infinity],
+  ];
+  let value = seconds;
+  for (const [unit, span] of units) {
+    if (Math.abs(value) < span) {
+      return new Intl.RelativeTimeFormat(lang(), { numeric: "auto" }).format(
+        Math.round(value),
+        unit,
+      );
+    }
+    value /= span;
+  }
+  return new Date(timestamp).toLocaleDateString(lang());
+}
+
+function presenceLabel(contact: Contact | undefined): string {
+  if (!contact) return t("status.offline");
+  if (contact.status !== "offline") return t(`status.${contact.status}`);
+  return contact.lastSeen
+    ? t("status.lastSeen").replace("{when}", relativeTime(contact.lastSeen))
+    : t("status.offline");
+}
+
 function updateHeader() {
   if (!current) return;
-  const status = contacts.get(current)?.status ?? "offline";
   $("#conv-header").textContent =
-    `🔒 ${contactLabel(current)} · @${current} · ${t(`status.${status}`)}`;
+    `🔒 ${contactLabel(current)} · @${current} · ${presenceLabel(contacts.get(current))}`;
 }
 
 async function selectContact(name: string) {
@@ -306,6 +342,7 @@ function addMessage(contact: string, msg: Message) {
       alias: contact,
       state: "accepted",
       status: "offline",
+      lastSeen: null,
       messages: [],
       loaded: true,
     });
@@ -319,6 +356,50 @@ function addMessage(contact: string, msg: Message) {
       .querySelector(`#contact-list li[data-name="${contact}"]`)
       ?.classList.add("unread");
   }
+}
+
+// ---- Ausencia automática ----
+//
+// Only "online" is managed automatically: picking away or busy by hand is a
+// deliberate choice and stays until the user changes it back.
+
+const IDLE_SECONDS = 5 * 60;
+const IDLE_CHECK_MS = 20_000;
+/// True while the current "away" was set by us, not by the user.
+let autoAway = false;
+/// Last webview activity, the fallback where system idle is unavailable.
+let lastActivity = Date.now();
+
+async function applyStatus(status: string) {
+  myStatus = status;
+  renderMyStatus();
+  ($("#settings-status") as HTMLSelectElement).value = status;
+  try {
+    await invoke("update_me", { alias: null, status });
+  } catch {
+    // Offline: the status is re-sent on reconnect.
+  }
+}
+
+async function checkIdle() {
+  const system = await invoke<number | null>("idle_seconds").catch(() => null);
+  const idle = system ?? Math.floor((Date.now() - lastActivity) / 1000);
+
+  if (!autoAway && myStatus === "online" && idle >= IDLE_SECONDS) {
+    autoAway = true;
+    await applyStatus("away");
+  } else if (autoAway && idle < IDLE_SECONDS) {
+    autoAway = false;
+    await applyStatus("online");
+  }
+}
+
+for (const event of ["mousemove", "mousedown", "keydown", "wheel", "focus"]) {
+  window.addEventListener(event, () => {
+    lastActivity = Date.now();
+    // Coming back is worth reflecting immediately, not at the next check.
+    if (autoAway) void checkIdle();
+  });
 }
 
 function renderMyStatus() {
@@ -371,6 +452,7 @@ async function enterChat(profile: ProfileInfo) {
   await connectWithRetry();
   // Presence and request states come with the contact list.
   setInterval(refreshContacts, PRESENCE_POLL_MS);
+  setInterval(checkIdle, IDLE_CHECK_MS);
 }
 
 async function boot() {
@@ -570,6 +652,9 @@ $("#settings-form").addEventListener("submit", async (e) => {
     });
     myAlias = alias;
     myStatus = status;
+    // A hand-picked status ends any automatic absence.
+    autoAway = false;
+    lastActivity = Date.now();
     $("#me-alias").textContent = myAlias;
     renderMyStatus();
     $("#settings").classList.add("hidden");

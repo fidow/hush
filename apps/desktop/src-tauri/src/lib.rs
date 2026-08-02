@@ -73,6 +73,35 @@ async fn reset_password(
         .await
 }
 
+/// Seconds since the user last touched keyboard or mouse *anywhere*, not just
+/// in this window, so stepping away from the machine counts as idle.
+/// `None` where the platform offers no such measure; the UI then falls back
+/// to its own activity tracking.
+#[tauri::command]
+fn idle_seconds() -> Option<u64> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::SystemInformation::GetTickCount;
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
+
+        let mut info = LASTINPUTINFO {
+            cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
+            dwTime: 0,
+        };
+        // SAFETY: `info` is correctly sized and lives for the whole call.
+        let ok = unsafe { GetLastInputInfo(&mut info) } != 0;
+        if !ok {
+            return None;
+        }
+        let elapsed_ms = unsafe { GetTickCount() }.wrapping_sub(info.dwTime);
+        Some(u64::from(elapsed_ms) / 1000)
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
 /// The recovery key of this device, for the user to copy and keep.
 #[tauri::command]
 async fn get_recovery_code(client: State<'_, HushClient>) -> Result<String, String> {
@@ -181,6 +210,7 @@ async fn get_contacts(client: State<'_, HushClient>) -> Result<Vec<serde_json::V
                 "alias": c.alias,
                 "state": c.state,
                 "status": c.status,
+                "last_seen": c.last_seen,
             })
         })
         .collect())
@@ -238,7 +268,8 @@ pub fn run() {
             get_recovery_code,
             restore_history,
             forgot_password,
-            reset_password
+            reset_password,
+            idle_seconds
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

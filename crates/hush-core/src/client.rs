@@ -694,7 +694,9 @@ impl Actor {
                         username,
                         alias,
                         state,
+                        // The cache only knows who they are, not where.
                         status: "offline".into(),
+                        last_seen: None,
                     })
                     .collect()
             })

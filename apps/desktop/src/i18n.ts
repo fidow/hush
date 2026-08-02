@@ -80,6 +80,7 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "status.away": "Ausente",
     "status.busy": "Ocupado",
     "status.offline": "Desconectado",
+    "status.lastSeen": "últ. vez {when}",
 
     "settings.title": "Ajustes",
     "settings.alias": "Nombre visible",
@@ -242,6 +243,7 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "status.away": "Away",
     "status.busy": "Busy",
     "status.offline": "Offline",
+    "status.lastSeen": "last seen {when}",
 
     "settings.title": "Settings",
     "settings.alias": "Display name",
