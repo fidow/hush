@@ -27,7 +27,7 @@
         justify-content: center;
         padding: 3rem 1.5rem;
       }
-      main { max-width: 40rem; width: 100%; }
+      main { max-width: 42rem; width: 100%; }
       .logo {
         width: 5rem; height: 5rem; border-radius: 1.2rem;
         background: linear-gradient(135deg, #8b7cf7, #4a3f9e);
@@ -36,18 +36,25 @@
       }
       h1 { font-size: 2.4rem; letter-spacing: 0.04em; }
       .tagline { color: var(--muted); font-size: 1.1rem; margin-bottom: 2.5rem; }
-      h2 { font-size: 1.1rem; margin: 2.5rem 0 0.6rem; }
+      h2 { font-size: 1.15rem; margin: 2.5rem 0 0.8rem; }
       p { color: var(--muted); }
       a { color: var(--accent); }
       .download {
         display: inline-block; background: var(--accent); color: #fff;
         text-decoration: none; padding: 0.8rem 1.6rem; border-radius: 10px;
-        font-weight: 600; margin-top: 0.5rem;
+        font-weight: 600;
       }
       .download:hover { background: #5f52c9; }
-      .note {
-        background: var(--panel); border-radius: 10px; padding: 1rem 1.2rem;
-        margin-top: 1rem; font-size: 0.92rem;
+      .download-note { font-size: 0.85rem; margin-top: 0.7rem; }
+      .panel {
+        background: var(--panel); border-radius: 10px; padding: 1.1rem 1.3rem;
+      }
+      dl { display: grid; grid-template-columns: auto 1fr; gap: 0.7rem 1.4rem; }
+      dt { font-weight: 600; white-space: nowrap; }
+      dd { color: var(--muted); }
+      code {
+        font-family: ui-monospace, Consolas, monospace;
+        font-size: 0.92em; color: var(--text);
       }
       footer {
         margin-top: 3rem; padding-top: 1.5rem; border-top: 1px solid #ffffff14;
@@ -61,32 +68,58 @@
       <h1>Hush</h1>
       <p class="tagline">Mensajería privada con cifrado post-cuántico.</p>
 
-      <a class="download" href="https://github.com/fidow/hush/releases">Descargar para Windows</a>
-
-      <h2>Por qué una app y no un cliente web</h2>
-      <p>
-        Un cliente web significaría que este servidor te entrega el código que
-        hace el cifrado cada vez que abres la página: un servidor comprometido
-        podría servirte sin ruido una versión que filtre tus mensajes, y no
-        tendrías forma de notarlo. La app de escritorio se instala una vez y
-        es verificable, que es lo que hace que «el servidor no puede leer tus
-        mensajes» sea un hecho y no una promesa.
+      <h2>Descargar</h2>
+      <a class="download" href="https://github.com/fidow/hush/releases/latest">Descargar para Windows</a>
+      <p class="download-note">
+        Sin firma digital todavía: Windows mostrará un aviso de SmartScreen la
+        primera vez. Elige «Más información» → «Ejecutar de todas formas».
       </p>
 
       <h2>Cómo protege tus mensajes</h2>
-      <p>
-        Las sesiones se establecen con PQXDH — X25519 combinado con Kyber-1024,
-        así que romperlo exige romper a la vez la criptografía clásica y la
-        post-cuántica — y los mensajes usan Double Ratchet, que da secreto
-        hacia adelante en cada mensaje. Este servidor solo transporta datos que
-        no puede leer.
-      </p>
+      <dl class="panel">
+        <dt>Cifrado extremo a extremo</dt>
+        <dd>
+          Los mensajes se cifran y descifran en tu dispositivo. Este servidor
+          solo transporta datos que no puede leer: ni el contenido, ni las
+          imágenes, ni el historial.
+        </dd>
 
-      <div class="note">
-        El historial se guarda cifrado con una clave de recuperación que nunca
-        sale de tus dispositivos. Consérvala: es lo único que permite
-        recuperar tus conversaciones en otro sitio.
-      </div>
+        <dt>Resistente a lo cuántico</dt>
+        <dd>
+          Las sesiones se establecen con <code>PQXDH</code>, que combina la
+          curva clásica X25519 con <code>Kyber-1024</code>. Romper una
+          conversación exigiría romper ambas, así que capturar el tráfico hoy
+          para descifrarlo con un ordenador cuántico mañana no sirve de nada.
+        </dd>
+
+        <dt>Secreto hacia adelante</dt>
+        <dd>
+          Cada mensaje usa una clave nueva mediante <code>Double Ratchet</code>.
+          Comprometer una clave no expone lo anterior, y la conversación se
+          recupera sola de un compromiso puntual.
+        </dd>
+
+        <dt>Historial cifrado</dt>
+        <dd>
+          Las conversaciones guardadas se cifran con
+          <code>XChaCha20-Poly1305</code> bajo una clave de recuperación
+          aleatoria que nunca sale de tus dispositivos. Sin ella, el archivo
+          del servidor es ruido.
+        </dd>
+
+        <dt>Cuentas</dt>
+        <dd>
+          Las contraseñas se guardan con <code>Argon2</code>, nunca en claro,
+          y solo puedes escribir a contactos que te han aceptado.
+        </dd>
+
+        <dt>Metadatos</dt>
+        <dd>
+          Los mensajes se borran del servidor en cuanto el destinatario los
+          recibe. Lo que el servidor sí conoce es quién habla con quién y
+          cuándo: eso es inherente a que exista un servidor de por medio.
+        </dd>
+      </dl>
 
       <footer>
         Código abierto con licencia AGPL-3.0 ·

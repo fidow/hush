@@ -27,7 +27,7 @@
         justify-content: center;
         padding: 3rem 1.5rem;
       }
-      main { max-width: 40rem; width: 100%; }
+      main { max-width: 42rem; width: 100%; }
       .logo {
         width: 5rem; height: 5rem; border-radius: 1.2rem;
         background: linear-gradient(135deg, #8b7cf7, #4a3f9e);
@@ -36,18 +36,25 @@
       }
       h1 { font-size: 2.4rem; letter-spacing: 0.04em; }
       .tagline { color: var(--muted); font-size: 1.1rem; margin-bottom: 2.5rem; }
-      h2 { font-size: 1.1rem; margin: 2.5rem 0 0.6rem; }
+      h2 { font-size: 1.15rem; margin: 2.5rem 0 0.8rem; }
       p { color: var(--muted); }
       a { color: var(--accent); }
       .download {
         display: inline-block; background: var(--accent); color: #fff;
         text-decoration: none; padding: 0.8rem 1.6rem; border-radius: 10px;
-        font-weight: 600; margin-top: 0.5rem;
+        font-weight: 600;
       }
       .download:hover { background: #5f52c9; }
-      .note {
-        background: var(--panel); border-radius: 10px; padding: 1rem 1.2rem;
-        margin-top: 1rem; font-size: 0.92rem;
+      .download-note { font-size: 0.85rem; margin-top: 0.7rem; }
+      .panel {
+        background: var(--panel); border-radius: 10px; padding: 1.1rem 1.3rem;
+      }
+      dl { display: grid; grid-template-columns: auto 1fr; gap: 0.7rem 1.4rem; }
+      dt { font-weight: 600; white-space: nowrap; }
+      dd { color: var(--muted); }
+      code {
+        font-family: ui-monospace, Consolas, monospace;
+        font-size: 0.92em; color: var(--text);
       }
       footer {
         margin-top: 3rem; padding-top: 1.5rem; border-top: 1px solid #ffffff14;
@@ -61,31 +68,57 @@
       <h1>Hush</h1>
       <p class="tagline">Private messaging with post-quantum encryption.</p>
 
-      <a class="download" href="https://github.com/fidow/hush/releases">Download for Windows</a>
-
-      <h2>Why an app and not a web client</h2>
-      <p>
-        A web client would mean this server hands you the code that does the
-        encryption every time you open the page — so a compromised server
-        could quietly serve a version that leaks your messages, and you would
-        have no way to tell. The desktop app is installed once and verifiable,
-        which is what makes “the server cannot read your messages” true rather
-        than a promise.
+      <h2>Download</h2>
+      <a class="download" href="https://github.com/fidow/hush/releases/latest">Download for Windows</a>
+      <p class="download-note">
+        Not code-signed yet, so Windows shows a SmartScreen warning the first
+        time. Pick “More info” → “Run anyway”.
       </p>
 
       <h2>How it protects your messages</h2>
-      <p>
-        Sessions are established with PQXDH — X25519 combined with Kyber-1024,
-        so breaking it requires breaking both classical and post-quantum
-        cryptography — and messages use the Double Ratchet, giving forward
-        secrecy per message. This server only relays data it cannot read.
-      </p>
+      <dl class="panel">
+        <dt>End-to-end encrypted</dt>
+        <dd>
+          Messages are encrypted and decrypted on your device. This server only
+          carries data it cannot read: not the text, not the images, not the
+          history.
+        </dd>
 
-      <div class="note">
-        Message history is encrypted under a recovery key that never leaves
-        your devices. Keep it: it is the only way to restore your
-        conversations elsewhere.
-      </div>
+        <dt>Quantum-resistant</dt>
+        <dd>
+          Sessions are established with <code>PQXDH</code>, combining the
+          classical X25519 curve with <code>Kyber-1024</code>. Breaking a
+          conversation would mean breaking both, so capturing traffic today to
+          decrypt it with a quantum computer tomorrow gets nowhere.
+        </dd>
+
+        <dt>Forward secrecy</dt>
+        <dd>
+          Every message uses a fresh key through the <code>Double Ratchet</code>.
+          Compromising one key exposes nothing earlier, and the conversation
+          heals itself after a one-off compromise.
+        </dd>
+
+        <dt>Encrypted history</dt>
+        <dd>
+          Stored conversations are sealed with <code>XChaCha20-Poly1305</code>
+          under a random recovery key that never leaves your devices. Without
+          it, the archive on the server is noise.
+        </dd>
+
+        <dt>Accounts</dt>
+        <dd>
+          Passwords are stored with <code>Argon2</code>, never in the clear,
+          and you can only message contacts who accepted you.
+        </dd>
+
+        <dt>Metadata</dt>
+        <dd>
+          Messages are deleted from the server as soon as the recipient has
+          them. What the server does know is who talks to whom and when: that
+          is inherent to having a server in the middle.
+        </dd>
+      </dl>
 
       <footer>
         Open source under AGPL-3.0 ·
