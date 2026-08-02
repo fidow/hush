@@ -4,32 +4,44 @@
 use std::time::Duration;
 
 use hush_core::{ApiClient, Engine};
+use sqlx::Row;
 
-async fn spawn_server() -> String {
+async fn spawn_server() -> (String, sqlx::SqlitePool) {
     let db_path = std::env::temp_dir().join(format!("hush-e2e-{}.sqlite3", uuid::Uuid::new_v4()));
     let db_url = format!(
         "sqlite://{}?mode=rwc",
         db_path.to_string_lossy().replace('\\', "/")
     );
     let pool = hush_server::connect_db(&db_url).await.expect("db");
+    let app_pool = pool.clone();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, hush_server::app(pool)).await.unwrap();
+        axum::serve(listener, hush_server::app(app_pool)).await.unwrap();
     });
-    format!("http://{addr}")
+    (format!("http://{addr}"), pool)
 }
 
-async fn onboard(base: &str, username: &str) -> (Engine, ApiClient) {
+async fn onboard(base: &str, pool: &sqlx::SqlitePool, username: &str) -> (Engine, ApiClient) {
     let mut engine = Engine::new(username).unwrap();
     let mut api = ApiClient::new(base);
     api.register(
         username,
+        &format!("Alias de {username}"),
+        &format!("{username}@example.com"),
+        "supersecreta",
         engine.registration_id().await.unwrap(),
         &engine.identity_key_b64().await.unwrap(),
     )
     .await
     .unwrap();
+    let code: String = sqlx::query("SELECT verify_code FROM accounts WHERE username = ?")
+        .bind(username)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+        .get(0);
+    api.verify(username, &code).await.unwrap();
     let keys = engine.generate_prekeys(4).await.unwrap();
     api.upload_keys(&keys).await.unwrap();
     (engine, api)
@@ -46,9 +58,12 @@ async fn recv_one(
 
 #[tokio::test]
 async fn encrypted_roundtrip_with_offline_delivery() {
-    let base = spawn_server().await;
-    let (mut alice, alice_api) = onboard(&base, "alice").await;
-    let (mut bob, bob_api) = onboard(&base, "bob").await;
+    let (base, pool) = spawn_server().await;
+    let (mut alice, alice_api) = onboard(&base, &pool, "alice").await;
+    let (mut bob, bob_api) = onboard(&base, &pool, "bob").await;
+
+    // Aliases are public profile data served to authenticated users.
+    assert_eq!(alice_api.fetch_profile("bob").await.unwrap(), "Alias de bob");
 
     // Alice establishes a PQXDH session from Bob's public bundle and sends
     // while Bob is offline.

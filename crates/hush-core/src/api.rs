@@ -53,21 +53,41 @@ impl ApiClient {
         Ok(res)
     }
 
-    /// Registers the account and stores the returned token.
+    /// Creates the account (pending email verification). Returns the dev
+    /// verification code if the server echoes it (HUSH_ECHO_CODE=1).
+    #[allow(clippy::too_many_arguments)]
     pub async fn register(
         &mut self,
         username: &str,
+        alias: &str,
+        email: &str,
+        password: &str,
         registration_id: u32,
         identity_key_b64: &str,
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
         let res = self
             .http
             .post(format!("{}/v1/accounts", self.base))
             .json(&json!({
                 "username": username,
+                "alias": alias,
+                "email": email,
+                "password": password,
                 "registration_id": registration_id,
                 "identity_key": identity_key_b64,
             }))
+            .send()
+            .await?;
+        let body: Value = Self::check(res).await?.json().await?;
+        Ok(body["dev_code"].as_str().map(str::to_string))
+    }
+
+    /// Confirms the account with the emailed code and stores the session token.
+    pub async fn verify(&mut self, username: &str, code: &str) -> Result<()> {
+        let res = self
+            .http
+            .post(format!("{}/v1/accounts/verify", self.base))
+            .json(&json!({ "username": username, "code": code }))
             .send()
             .await?;
         let body: Value = Self::check(res).await?.json().await?;
@@ -78,6 +98,34 @@ impl ApiClient {
                 .to_string(),
         );
         Ok(())
+    }
+
+    /// Logs into an existing (verified) account and stores the session token.
+    pub async fn login(&mut self, username: &str, password: &str) -> Result<()> {
+        let res = self
+            .http
+            .post(format!("{}/v1/sessions", self.base))
+            .json(&json!({ "username": username, "password": password }))
+            .send()
+            .await?;
+        let body: Value = Self::check(res).await?.json().await?;
+        self.token = Some(
+            body["token"]
+                .as_str()
+                .context("no token in response")?
+                .to_string(),
+        );
+        Ok(())
+    }
+
+    /// Public profile (alias) of a user.
+    pub async fn fetch_profile(&self, username: &str) -> Result<String> {
+        let req = self.auth(
+            self.http
+                .get(format!("{}/v1/profile/{username}", self.base)),
+        )?;
+        let body: Value = Self::check(req.send().await?).await?.json().await?;
+        Ok(body["alias"].as_str().unwrap_or_default().to_string())
     }
 
     pub async fn upload_keys(&self, body: &Value) -> Result<()> {

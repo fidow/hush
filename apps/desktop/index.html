@@ -9,7 +9,7 @@
   </head>
 
   <body>
-    <!-- Login -->
+    <!-- Registro -->
     <section id="login" class="screen">
       <form id="login-form" class="login-card">
         <h1>Hush</h1>
@@ -22,8 +22,37 @@
           Nombre de usuario
           <input id="username-input" placeholder="ej. alice" pattern="[A-Za-z0-9_]{1,32}" required autofocus />
         </label>
-        <button type="submit" id="login-btn">Crear cuenta y entrar</button>
+        <label>
+          Alias (nombre visible)
+          <input id="alias-input" placeholder="ej. Alicia G." maxlength="64" required />
+        </label>
+        <label>
+          Email
+          <input id="email-input" type="email" placeholder="tu@email.com" required />
+        </label>
+        <label>
+          Contraseña
+          <input id="password-input" type="password" minlength="8" placeholder="mínimo 8 caracteres" required />
+        </label>
+        <button type="submit" id="login-btn">Crear cuenta</button>
         <p id="login-error" class="error"></p>
+      </form>
+    </section>
+
+    <!-- Verificación por email -->
+    <section id="verify" class="screen hidden">
+      <form id="verify-form" class="login-card">
+        <h1>📮</h1>
+        <p class="tagline">
+          Te hemos enviado un código de 6 dígitos a tu email.<br />Introdúcelo para
+          activar la cuenta.
+        </p>
+        <label>
+          Código de verificación
+          <input id="code-input" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" placeholder="000000" required />
+        </label>
+        <button type="submit" id="verify-btn">Verificar</button>
+        <p id="verify-error" class="error"></p>
       </form>
     </section>
 
@@ -32,7 +61,10 @@
       <aside class="sidebar">
         <header class="me">
           <span class="dot"></span>
-          <span id="me-name"></span>
+          <div class="me-names">
+            <span id="me-alias"></span>
+            <small id="me-name"></small>
+          </div>
         </header>
         <form id="add-contact-form">
           <input id="add-contact-input" placeholder="añadir contacto…" pattern="[A-Za-z0-9_]{1,32}" />
@@ -42,7 +74,12 @@
       <main class="conversation">
         <header id="conv-header">Selecciona un contacto</header>
         <div id="messages"></div>
+        <div id="emoji-panel" class="hidden">
+          <div id="emoji-tabs"></div>
+          <div id="emoji-grid"></div>
+        </div>
         <form id="send-form">
+          <button type="button" id="emoji-btn" title="Emojis" disabled>🙂</button>
           <input id="send-input" placeholder="Escribe un mensaje cifrado…" autocomplete="off" disabled />
           <button type="submit" id="send-btn" disabled>Enviar</button>
         </form>

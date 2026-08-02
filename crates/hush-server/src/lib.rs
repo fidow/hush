@@ -1,7 +1,12 @@
 //! Hush server: a "dumb" relay/mailbox. It stores public key bundles and
 //! queues of opaque encrypted blobs; it can never read message contents.
 
+pub mod mail;
+
 use std::{collections::HashMap, convert::Infallible, sync::Arc};
+
+use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
+use argon2::Argon2;
 
 use axum::{
     extract::{FromRequestParts, Path, State},
@@ -11,7 +16,7 @@ use axum::{
     Json, Router,
 };
 use base64::Engine;
-use rand::RngCore;
+use rand::{Rng, RngCore};
 use serde::{Deserialize, Serialize};
 use sqlx::{sqlite::SqlitePoolOptions, Row, SqlitePool};
 use tokio::sync::{mpsc, Mutex};
@@ -20,6 +25,12 @@ use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS accounts (
     username        TEXT PRIMARY KEY,
+    alias           TEXT NOT NULL DEFAULT '',
+    email           TEXT NOT NULL DEFAULT '',
+    password_hash   TEXT NOT NULL DEFAULT '',
+    verified        INTEGER NOT NULL DEFAULT 0,
+    verify_code     TEXT,
+    verify_expires  INTEGER,
     token           TEXT NOT NULL UNIQUE,
     registration_id INTEGER NOT NULL,
     identity_key    TEXT NOT NULL,
@@ -69,6 +80,9 @@ pub fn app(db: SqlitePool) -> Router {
     };
     Router::new()
         .route("/v1/accounts", post(register))
+        .route("/v1/accounts/verify", post(verify_account))
+        .route("/v1/sessions", post(login))
+        .route("/v1/profile/{username}", get(get_profile))
         .route("/v1/keys", put(upload_keys))
         .route("/v1/keys/{username}", get(fetch_bundle))
         .route("/v1/messages/stream", get(message_stream))
@@ -104,7 +118,7 @@ impl FromRequestParts<AppState> for AuthUser {
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "))
             .ok_or((StatusCode::UNAUTHORIZED, "missing bearer token".into()))?;
-        let row = sqlx::query("SELECT username FROM accounts WHERE token = ?")
+        let row = sqlx::query("SELECT username FROM accounts WHERE token = ? AND verified = 1")
             .bind(token)
             .fetch_optional(&state.db)
             .await
@@ -119,51 +133,209 @@ impl FromRequestParts<AppState> for AuthUser {
 #[derive(Deserialize)]
 struct RegisterRequest {
     username: String,
+    #[serde(default)]
+    alias: String,
+    email: String,
+    password: String,
     registration_id: i64,
     identity_key: String,
 }
 
-#[derive(Serialize)]
-struct RegisterResponse {
-    token: String,
+fn new_token() -> String {
+    let mut raw = [0u8; 32];
+    rand::rng().fill_bytes(&mut raw);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw)
 }
 
 async fn register(
     State(state): State<AppState>,
     Json(req): Json<RegisterRequest>,
-) -> Result<Json<RegisterResponse>, ApiError> {
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let bad = |msg: &str| (StatusCode::BAD_REQUEST, msg.to_string());
     if req.username.is_empty()
         || req.username.len() > 32
         || !req.username.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
     {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "username must be 1-32 chars of [a-zA-Z0-9_]".into(),
-        ));
+        return Err(bad("username must be 1-32 chars of [a-zA-Z0-9_]"));
     }
-    let mut raw = [0u8; 32];
-    rand::rng().fill_bytes(&mut raw);
-    let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw);
+    if req.alias.len() > 64 {
+        return Err(bad("alias too long (max 64)"));
+    }
+    if !req.email.contains('@') || req.email.len() > 254 {
+        return Err(bad("invalid email"));
+    }
+    if req.password.len() < 8 {
+        return Err(bad("password must be at least 8 chars"));
+    }
 
-    let res = sqlx::query(
-        "INSERT INTO accounts (username, token, registration_id, identity_key, created_at)
-         VALUES (?, ?, ?, ?, ?)",
+    let mut salt_bytes = [0u8; 16];
+    rand::rng().fill_bytes(&mut salt_bytes);
+    let salt = SaltString::encode_b64(&salt_bytes).map_err(internal)?;
+    let password_hash = Argon2::default()
+        .hash_password(req.password.as_bytes(), &salt)
+        .map_err(internal)?
+        .to_string();
+    let token = new_token();
+    let code = format!("{:06}", rand::rng().random_range(0..1_000_000u32));
+    let expires = now() + 24 * 60 * 60 * 1000;
+
+    let existing = sqlx::query("SELECT verified FROM accounts WHERE username = ?")
+        .bind(&req.username)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(internal)?;
+    match existing {
+        Some(row) if row.get::<i64, _>(0) != 0 => {
+            return Err((StatusCode::CONFLICT, "username already taken".into()));
+        }
+        Some(_) => {
+            // Unverified leftover: allow re-registering (fresh code and keys).
+            sqlx::query(
+                "UPDATE accounts SET alias=?, email=?, password_hash=?, verify_code=?,
+                 verify_expires=?, token=?, registration_id=?, identity_key=? WHERE username=?",
+            )
+            .bind(&req.alias)
+            .bind(&req.email)
+            .bind(&password_hash)
+            .bind(&code)
+            .bind(expires)
+            .bind(&token)
+            .bind(req.registration_id)
+            .bind(&req.identity_key)
+            .bind(&req.username)
+            .execute(&state.db)
+            .await
+            .map_err(internal)?;
+        }
+        None => {
+            sqlx::query(
+                "INSERT INTO accounts (username, alias, email, password_hash, verify_code,
+                 verify_expires, token, registration_id, identity_key, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&req.username)
+            .bind(&req.alias)
+            .bind(&req.email)
+            .bind(&password_hash)
+            .bind(&code)
+            .bind(expires)
+            .bind(&token)
+            .bind(req.registration_id)
+            .bind(&req.identity_key)
+            .bind(now())
+            .execute(&state.db)
+            .await
+            .map_err(internal)?;
+        }
+    }
+
+    tracing::info!(username = %req.username, email = %req.email, "cuenta creada, pendiente de verificación");
+    match mail::MailConfig::from_env() {
+        Some(cfg) => {
+            let (email, username, code) = (req.email.clone(), req.username.clone(), code.clone());
+            tokio::task::spawn_blocking(move || {
+                match cfg.send_verification(&email, &username, &code) {
+                    Ok(()) => tracing::info!(%username, "email de verificación enviado"),
+                    Err(e) => tracing::error!(%username, "fallo enviando email de verificación: {e}"),
+                }
+            });
+        }
+        None => {
+            tracing::info!(username = %req.username, "SMTP no configurado; código de verificación: {code}");
+        }
+    }
+
+    let mut resp = serde_json::json!({ "status": "pending_verification" });
+    if std::env::var("HUSH_ECHO_CODE").is_ok_and(|v| v == "1") {
+        resp["dev_code"] = code.into();
+    }
+    Ok(Json(resp))
+}
+
+#[derive(Deserialize)]
+struct VerifyRequest {
+    username: String,
+    code: String,
+}
+
+async fn verify_account(
+    State(state): State<AppState>,
+    Json(req): Json<VerifyRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let row = sqlx::query(
+        "SELECT token, verify_code, verify_expires, verified FROM accounts WHERE username = ?",
     )
     .bind(&req.username)
-    .bind(&token)
-    .bind(req.registration_id)
-    .bind(&req.identity_key)
-    .bind(now())
-    .execute(&state.db)
-    .await;
+    .fetch_optional(&state.db)
+    .await
+    .map_err(internal)?
+    .ok_or((StatusCode::NOT_FOUND, "no such user".into()))?;
 
-    match res {
-        Ok(_) => Ok(Json(RegisterResponse { token })),
-        Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
-            Err((StatusCode::CONFLICT, "username already taken".into()))
-        }
-        Err(e) => Err(internal(e)),
+    if row.get::<i64, _>(3) != 0 {
+        return Err((StatusCode::CONFLICT, "account already verified".into()));
     }
+    let stored_code: Option<String> = row.get(1);
+    let expires: Option<i64> = row.get(2);
+    let valid = stored_code.as_deref() == Some(req.code.as_str())
+        && expires.is_some_and(|e| e > now());
+    if !valid {
+        return Err((StatusCode::BAD_REQUEST, "invalid or expired code".into()));
+    }
+
+    sqlx::query("UPDATE accounts SET verified = 1, verify_code = NULL WHERE username = ?")
+        .bind(&req.username)
+        .execute(&state.db)
+        .await
+        .map_err(internal)?;
+    tracing::info!(username = %req.username, "cuenta verificada");
+    Ok(Json(serde_json::json!({ "token": row.get::<String, _>(0) })))
+}
+
+#[derive(Deserialize)]
+struct LoginRequest {
+    username: String,
+    password: String,
+}
+
+async fn login(
+    State(state): State<AppState>,
+    Json(req): Json<LoginRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let row = sqlx::query("SELECT token, password_hash, verified FROM accounts WHERE username = ?")
+        .bind(&req.username)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(internal)?;
+    // Same error for unknown user and wrong password: don't leak which usernames exist.
+    let denied = || (StatusCode::UNAUTHORIZED, "invalid credentials".into());
+    let row = row.ok_or_else(denied)?;
+    let hash_str: String = row.get(1);
+    let parsed = PasswordHash::new(&hash_str).map_err(internal)?;
+    Argon2::default()
+        .verify_password(req.password.as_bytes(), &parsed)
+        .map_err(|_| denied())?;
+    if row.get::<i64, _>(2) == 0 {
+        return Err((StatusCode::FORBIDDEN, "account not verified".into()));
+    }
+    tracing::info!(username = %req.username, "login correcto");
+    Ok(Json(serde_json::json!({ "token": row.get::<String, _>(0) })))
+}
+
+async fn get_profile(
+    _auth: AuthUser,
+    State(state): State<AppState>,
+    Path(username): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let row = sqlx::query("SELECT alias FROM accounts WHERE username = ? AND verified = 1")
+        .bind(&username)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(internal)?
+        .ok_or((StatusCode::NOT_FOUND, "no such user".into()))?;
+    Ok(Json(serde_json::json!({
+        "username": username,
+        "alias": row.get::<String, _>(0),
+    })))
 }
 
 #[derive(Deserialize)]
@@ -304,9 +476,11 @@ async fn send_message(
         .await
         .map_err(internal)?;
 
+    tracing::debug!(from = %msg.sender, to = %recipient, id = %msg.id, "mensaje encolado");
     // Best-effort live push; the SSE backlog query covers anyone offline.
     if let Some(tx) = state.live.lock().await.get(&recipient) {
         let _ = tx.try_send(msg.clone());
+        tracing::debug!(to = %recipient, id = %msg.id, "entrega en vivo (SSE)");
     }
     Ok(Json(SendMessageResponse { id: msg.id }))
 }
@@ -331,6 +505,7 @@ async fn message_stream(
     .fetch_all(&state.db)
     .await
     .map_err(internal)?;
+    tracing::debug!(user = %auth.username, backlog = rows.len(), "stream SSE abierto");
     tokio::spawn(async move {
         for r in rows {
             let msg = OutMessage {
@@ -364,5 +539,6 @@ async fn ack_message(
         .execute(&state.db)
         .await
         .map_err(internal)?;
+    tracing::debug!(user = %auth.username, id = %id, "mensaje confirmado y borrado");
     Ok(StatusCode::NO_CONTENT)
 }

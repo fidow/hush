@@ -5,6 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+argon2 = "0.5"
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "builder", "hostname", "pool", "rustls-tls"] }
 axum = "0.8"
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
 uuid = { version = "1", features = ["v4"] }

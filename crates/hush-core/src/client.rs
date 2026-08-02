@@ -23,12 +23,23 @@ enum Command {
     Register {
         server: String,
         username: String,
+        alias: String,
+        email: String,
+        password: String,
+        reply: oneshot::Sender<Result<Option<String>, String>>,
+    },
+    Verify {
+        code: String,
         reply: oneshot::Sender<Result<mpsc::Receiver<DecryptedMessage>, String>>,
     },
     Send {
         recipient: String,
         text: String,
         reply: oneshot::Sender<Result<(), String>>,
+    },
+    Profile {
+        username: String,
+        reply: oneshot::Sender<Result<String, String>>,
     },
 }
 
@@ -54,38 +65,70 @@ impl HushClient {
         Self { tx }
     }
 
-    /// Creates the account, publishes prekeys and opens the message stream.
-    /// The returned channel yields decrypted incoming messages and closes if
-    /// the server connection drops.
-    pub async fn register(
+    async fn request<T>(
         &self,
-        server: &str,
-        username: &str,
-    ) -> Result<mpsc::Receiver<DecryptedMessage>, String> {
+        make: impl FnOnce(oneshot::Sender<Result<T, String>>) -> Command,
+    ) -> Result<T, String> {
         let (reply, rx) = oneshot::channel();
         self.tx
-            .send(Command::Register {
-                server: server.to_string(),
-                username: username.to_string(),
-                reply,
-            })
+            .send(make(reply))
             .await
             .map_err(|_| "engine closed".to_string())?;
         rx.await.map_err(|_| "engine closed".to_string())?
     }
 
+    /// Creates the account (pending email verification). Returns the dev
+    /// verification code when the server echoes it.
+    pub async fn register(
+        &self,
+        server: &str,
+        username: &str,
+        alias: &str,
+        email: &str,
+        password: &str,
+    ) -> Result<Option<String>, String> {
+        let (server, username, alias, email, password) = (
+            server.to_string(),
+            username.to_string(),
+            alias.to_string(),
+            email.to_string(),
+            password.to_string(),
+        );
+        self.request(|reply| Command::Register {
+            server,
+            username,
+            alias,
+            email,
+            password,
+            reply,
+        })
+        .await
+    }
+
+    /// Confirms the account with the emailed code, publishes prekeys and opens
+    /// the message stream. The returned channel yields decrypted incoming
+    /// messages and closes if the server connection drops.
+    pub async fn verify(&self, code: &str) -> Result<mpsc::Receiver<DecryptedMessage>, String> {
+        let code = code.to_string();
+        self.request(|reply| Command::Verify { code, reply }).await
+    }
+
     /// Encrypts and sends `text`, establishing a session first if needed.
     pub async fn send_text(&self, recipient: &str, text: &str) -> Result<(), String> {
-        let (reply, rx) = oneshot::channel();
-        self.tx
-            .send(Command::Send {
-                recipient: recipient.to_string(),
-                text: text.to_string(),
-                reply,
-            })
+        let (recipient, text) = (recipient.to_string(), text.to_string());
+        self.request(|reply| Command::Send {
+            recipient,
+            text,
+            reply,
+        })
+        .await
+    }
+
+    /// Fetches the public alias of a user (also validates that it exists).
+    pub async fn fetch_alias(&self, username: &str) -> Result<String, String> {
+        let username = username.to_string();
+        self.request(|reply| Command::Profile { username, reply })
             .await
-            .map_err(|_| "engine closed".to_string())?;
-        rx.await.map_err(|_| "engine closed".to_string())?
     }
 }
 
@@ -94,22 +137,50 @@ struct Session {
     api: ApiClient,
 }
 
+/// Account created but not yet verified: keys exist locally, no token yet.
+struct Pending {
+    engine: Engine,
+    api: ApiClient,
+    username: String,
+}
+
 async fn do_register(
     server: &str,
     username: &str,
-) -> anyhow::Result<(Session, mpsc::Receiver<IncomingMessage>)> {
-    let mut engine = Engine::new(username)?;
+    alias: &str,
+    email: &str,
+    password: &str,
+) -> anyhow::Result<(Pending, Option<String>)> {
+    let engine = Engine::new(username)?;
     let mut api = ApiClient::new(server.trim_end_matches('/'));
-    api.register(
-        username,
-        engine.registration_id().await?,
-        &engine.identity_key_b64().await?,
-    )
-    .await?;
-    let keys = engine.generate_prekeys(20).await?;
-    api.upload_keys(&keys).await?;
-    let stream = api.stream().await?;
-    Ok((Session { engine, api }, stream))
+    let dev_code = api
+        .register(
+            username,
+            alias,
+            email,
+            password,
+            engine.registration_id().await?,
+            &engine.identity_key_b64().await?,
+        )
+        .await?;
+    Ok((
+        Pending {
+            engine,
+            api,
+            username: username.to_string(),
+        },
+        dev_code,
+    ))
+}
+
+async fn do_verify(
+    pending: &mut Pending,
+    code: &str,
+) -> anyhow::Result<mpsc::Receiver<IncomingMessage>> {
+    pending.api.verify(&pending.username, code).await?;
+    let keys = pending.engine.generate_prekeys(20).await?;
+    pending.api.upload_keys(&keys).await?;
+    Ok(pending.api.stream().await?)
 }
 
 async fn handle_send(
@@ -158,6 +229,7 @@ async fn handle_incoming(
 }
 
 async fn actor(mut commands: mpsc::Receiver<Command>) {
+    let mut pending: Option<Pending> = None;
     let mut session: Option<Session> = None;
     let mut stream: Option<mpsc::Receiver<IncomingMessage>> = None;
     let mut events: Option<mpsc::Sender<DecryptedMessage>> = None;
@@ -166,23 +238,44 @@ async fn actor(mut commands: mpsc::Receiver<Command>) {
         tokio::select! {
             cmd = commands.recv() => match cmd {
                 None => break,
-                Some(Command::Register { server, username, reply }) => {
-                    match do_register(&server, &username).await {
-                        Ok((new_session, new_stream)) => {
-                            let (tx, rx) = mpsc::channel(256);
-                            session = Some(new_session);
-                            stream = Some(new_stream);
-                            events = Some(tx);
-                            let _ = reply.send(Ok(rx));
+                Some(Command::Register { server, username, alias, email, password, reply }) => {
+                    match do_register(&server, &username, &alias, &email, &password).await {
+                        Ok((new_pending, dev_code)) => {
+                            pending = Some(new_pending);
+                            let _ = reply.send(Ok(dev_code));
                         }
                         Err(e) => {
                             let _ = reply.send(Err(e.to_string()));
                         }
                     }
                 }
+                Some(Command::Verify { code, reply }) => {
+                    let result = match pending.as_mut() {
+                        None => Err("no pending registration".to_string()),
+                        Some(p) => match do_verify(p, &code).await {
+                            Ok(new_stream) => {
+                                let Pending { engine, api, .. } = pending.take().expect("checked");
+                                let (tx, rx) = mpsc::channel(256);
+                                session = Some(Session { engine, api });
+                                stream = Some(new_stream);
+                                events = Some(tx);
+                                Ok(rx)
+                            }
+                            Err(e) => Err(e.to_string()),
+                        },
+                    };
+                    let _ = reply.send(result);
+                }
                 Some(Command::Send { recipient, text, reply }) => {
                     let result = handle_send(&mut session, &recipient, &text).await;
                     let _ = reply.send(result.map_err(|e| e.to_string()));
+                }
+                Some(Command::Profile { username, reply }) => {
+                    let result = match session.as_ref().map(|s| &s.api).or(pending.as_ref().map(|p| &p.api)) {
+                        None => Err("no session".to_string()),
+                        Some(api) => api.fetch_profile(&username).await.map_err(|e| e.to_string()),
+                    };
+                    let _ = reply.send(result);
                 }
             },
             msg = async { stream.as_mut().expect("guarded by if").recv().await }, if stream.is_some() => {

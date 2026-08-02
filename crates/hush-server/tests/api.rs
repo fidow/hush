@@ -2,23 +2,59 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use serde_json::{json, Value};
+use sqlx::Row;
 
-async fn spawn_server() -> String {
+async fn spawn_server() -> (String, sqlx::SqlitePool) {
     let db_path = std::env::temp_dir().join(format!("hush-test-{}.sqlite3", uuid::Uuid::new_v4()));
     let db_url = format!("sqlite://{}?mode=rwc", db_path.to_string_lossy().replace('\\', "/"));
     let pool = hush_server::connect_db(&db_url).await.expect("db");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    let app_pool = pool.clone();
     tokio::spawn(async move {
-        axum::serve(listener, hush_server::app(pool)).await.unwrap();
+        axum::serve(listener, hush_server::app(app_pool)).await.unwrap();
     });
-    format!("http://{addr}")
+    (format!("http://{addr}"), pool)
 }
 
-async fn register(client: &reqwest::Client, base: &str, username: &str) -> String {
+async fn pending_code(pool: &sqlx::SqlitePool, username: &str) -> String {
+    sqlx::query("SELECT verify_code FROM accounts WHERE username = ?")
+        .bind(username)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+        .get(0)
+}
+
+/// Registers + verifies an account, returning its bearer token.
+async fn register(
+    client: &reqwest::Client,
+    base: &str,
+    pool: &sqlx::SqlitePool,
+    username: &str,
+    alias: &str,
+) -> String {
     let res = client
         .post(format!("{base}/v1/accounts"))
-        .json(&json!({ "username": username, "registration_id": 42, "identity_key": "IKEY" }))
+        .json(&json!({
+            "username": username,
+            "alias": alias,
+            "email": format!("{username}@example.com"),
+            "password": "supersecreta",
+            "registration_id": 42,
+            "identity_key": "IKEY"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    let body: Value = res.json().await.unwrap();
+    assert_eq!(body["status"], "pending_verification");
+
+    let code = pending_code(pool, username).await;
+    let res = client
+        .post(format!("{base}/v1/accounts/verify"))
+        .json(&json!({ "username": username, "code": code }))
         .send()
         .await
         .unwrap();
@@ -56,20 +92,101 @@ async fn next_sse_message(
 }
 
 #[tokio::test]
-async fn full_flow() {
-    let base = spawn_server().await;
+async fn account_lifecycle() {
+    let (base, pool) = spawn_server().await;
     let client = reqwest::Client::new();
 
-    // Registration + duplicate rejection
-    let alice = register(&client, &base, "alice").await;
-    let bob = register(&client, &base, "bob").await;
-    let dup = client
+    // Wrong verification code is rejected
+    let res = client
         .post(format!("{base}/v1/accounts"))
-        .json(&json!({ "username": "alice", "registration_id": 1, "identity_key": "X" }))
+        .json(&json!({
+            "username": "carol", "alias": "Carol", "email": "carol@example.com",
+            "password": "supersecreta", "registration_id": 1, "identity_key": "X"
+        }))
         .send()
         .await
         .unwrap();
-    assert_eq!(dup.status(), 409);
+    assert_eq!(res.status(), 200);
+    let res = client
+        .post(format!("{base}/v1/accounts/verify"))
+        .json(&json!({ "username": "carol", "code": "000000x" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 400);
+
+    // Unverified accounts cannot authenticate or be messaged/profiled
+    let alice = register(&client, &base, &pool, "alice", "Alicia").await;
+    let res = client
+        .get(format!("{base}/v1/profile/carol"))
+        .bearer_auth(&alice)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 404);
+
+    // Duplicate of a verified username is rejected
+    let res = client
+        .post(format!("{base}/v1/accounts"))
+        .json(&json!({
+            "username": "alice", "alias": "Otra", "email": "otra@example.com",
+            "password": "supersecreta", "registration_id": 2, "identity_key": "Y"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 409);
+
+    // Weak password / bad email are rejected
+    let res = client
+        .post(format!("{base}/v1/accounts"))
+        .json(&json!({
+            "username": "dave", "alias": "", "email": "dave@example.com",
+            "password": "corta", "registration_id": 1, "identity_key": "X"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 400);
+
+    // Login: right and wrong password
+    let res = client
+        .post(format!("{base}/v1/sessions"))
+        .json(&json!({ "username": "alice", "password": "supersecreta" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    let relogin: Value = res.json().await.unwrap();
+    assert_eq!(relogin["token"].as_str().unwrap(), alice);
+    let res = client
+        .post(format!("{base}/v1/sessions"))
+        .json(&json!({ "username": "alice", "password": "incorrecta" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 401);
+
+    // Profile returns the alias
+    let profile: Value = client
+        .get(format!("{base}/v1/profile/alice"))
+        .bearer_auth(&alice)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(profile["alias"], "Alicia");
+}
+
+#[tokio::test]
+async fn full_flow() {
+    let (base, pool) = spawn_server().await;
+    let client = reqwest::Client::new();
+
+    let alice = register(&client, &base, &pool, "alice", "Alicia").await;
+    let bob = register(&client, &base, &pool, "bob", "Roberto").await;
 
     // Auth required
     let unauth = client.get(format!("{base}/v1/keys/bob")).send().await.unwrap();

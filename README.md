@@ -39,6 +39,24 @@ npm run tauri dev        # desktop app against the local relay
 To try a conversation locally, run the relay plus two instances of the app,
 register a different username in each, add the other user as contact and chat.
 
+### Server configuration (environment variables)
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `HUSH_ADDR` | `127.0.0.1:8080` | Listen address |
+| `HUSH_DB` | `sqlite://hush.sqlite3?mode=rwc` | SQLite database URL |
+| `HUSH_LOG` | `info` | Log level; set `debug` to trace users/messages (toggleable debug mode) |
+| `HUSH_SMTP_HOST` | *(unset)* | SMTP relay for verification emails; unset = codes are logged instead |
+| `HUSH_SMTP_PORT` | `25` | SMTP port |
+| `HUSH_SMTP_FROM` | `hush@localhost` | From address (e.g. `hush@example.com`) |
+| `HUSH_SMTP_USER` / `HUSH_SMTP_PASS` | *(unset)* | Optional SMTP credentials |
+| `HUSH_SMTP_STARTTLS` | *(unset)* | Set to `1` to use STARTTLS |
+| `HUSH_ECHO_CODE` | *(unset)* | Set to `1` (dev only!) to echo verification codes in the API response |
+
+Accounts require a username, a public alias, an email and a password
+(argon2-hashed). New accounts must be confirmed with a 6-digit code sent by
+email before they can log in or exchange messages.
+
 ## License
 
 AGPL-3.0-only.
