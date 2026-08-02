@@ -192,17 +192,16 @@ async function boot() {
   show("login");
 }
 
-// ---- Pestañas registro / entrar ----
+// ---- Alternar entrar / crear cuenta (login por defecto) ----
 
-function setAuthTab(register: boolean) {
-  $("#tab-register").classList.toggle("active", register);
-  $("#tab-signin").classList.toggle("active", !register);
+function setAuthMode(register: boolean) {
   $("#login-form").classList.toggle("hidden", !register);
   $("#signin-form").classList.toggle("hidden", register);
+  $(register ? "#username-input" : "#signin-username-input").focus();
 }
 
-$("#tab-register").addEventListener("click", () => setAuthTab(true));
-$("#tab-signin").addEventListener("click", () => setAuthTab(false));
+$("#to-register").addEventListener("click", () => setAuthMode(true));
+$("#to-signin").addEventListener("click", () => setAuthMode(false));
 
 $("#login-form").addEventListener("submit", async (e) => {
   e.preventDefault();

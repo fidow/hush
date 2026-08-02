@@ -19,19 +19,38 @@
       <div class="login-card">
         <h1>Hush</h1>
         <p class="tagline">Mensajería privada con cifrado post-cuántico</p>
-        <div class="auth-tabs">
-          <button type="button" id="tab-register" class="auth-tab active">Crear cuenta</button>
-          <button type="button" id="tab-signin" class="auth-tab">Entrar</button>
-        </div>
+        <form id="signin-form" class="auth-form">
+          <label>
+            Servidor
+            <input id="signin-server-input" value="http://127.0.0.1:8080" required />
+          </label>
+          <label>
+            Nombre de usuario
+            <input id="signin-username-input" placeholder="ej. alice" pattern="[A-Za-z0-9_]{1,32}" required autofocus />
+          </label>
+          <label>
+            Contraseña
+            <input id="signin-password-input" type="password" required />
+          </label>
+          <button type="submit" id="signin-btn">Entrar</button>
+          <p id="signin-error" class="error"></p>
+          <p class="hint">
+            Si entras desde un dispositivo nuevo se generarán claves de cifrado
+            nuevas; el historial anterior no se transfiere.
+          </p>
+          <button type="button" id="to-register" class="switch-link">
+            ¿No tienes cuenta? Crear una
+          </button>
+        </form>
 
-        <form id="login-form" class="auth-form">
+        <form id="login-form" class="auth-form hidden">
           <label>
             Servidor
             <input id="server-input" value="http://127.0.0.1:8080" required />
           </label>
           <label>
             Nombre de usuario
-            <input id="username-input" placeholder="ej. alice" pattern="[A-Za-z0-9_]{1,32}" required autofocus />
+            <input id="username-input" placeholder="ej. alice" pattern="[A-Za-z0-9_]{1,32}" required />
           </label>
           <label>
             Alias (nombre visible)
@@ -47,27 +66,9 @@
           </label>
           <button type="submit" id="login-btn">Crear cuenta</button>
           <p id="login-error" class="error"></p>
-        </form>
-
-        <form id="signin-form" class="auth-form hidden">
-          <label>
-            Servidor
-            <input id="signin-server-input" value="http://127.0.0.1:8080" required />
-          </label>
-          <label>
-            Nombre de usuario
-            <input id="signin-username-input" placeholder="ej. alice" pattern="[A-Za-z0-9_]{1,32}" required />
-          </label>
-          <label>
-            Contraseña
-            <input id="signin-password-input" type="password" required />
-          </label>
-          <button type="submit" id="signin-btn">Entrar</button>
-          <p id="signin-error" class="error"></p>
-          <p class="hint">
-            Si entras desde un dispositivo nuevo se generarán claves de cifrado
-            nuevas; el historial anterior no se transfiere.
-          </p>
+          <button type="button" id="to-signin" class="switch-link">
+            ¿Ya tienes cuenta? Entrar
+          </button>
         </form>
       </div>
     </section>

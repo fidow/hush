@@ -42,21 +42,18 @@ body {
   justify-content: center;
 }
 
-.auth-tabs {
-  display: flex;
-  gap: 0.4rem;
-  margin-bottom: 0.3rem;
+.switch-link {
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.85rem;
+  padding: 0.2rem;
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 
-.auth-tab {
-  flex: 1;
-  background: var(--panel-2);
-  opacity: 0.6;
-}
-
-.auth-tab.active {
-  background: var(--accent-2);
-  opacity: 1;
+.switch-link:hover {
+  background: transparent;
+  color: var(--text);
 }
 
 .auth-form {
