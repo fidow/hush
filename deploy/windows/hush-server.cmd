@@ -28,6 +28,13 @@ rem info en produccion. Con debug se registra quien escribe a quien y cuando,
 rem que es justo el metadato que no conviene dejar en disco.
 set HUSH_LOG=info
 
+rem Fichero de log. Como tarea programada no hay consola donde mirar, asi que
+rem sin esto el registro se pierde. Vale cualquier ruta absoluta: otra unidad
+rem (D:\logs\hush.log) o un recurso de red (\\servidor\logs\hush.log). La
+rem carpeta se crea sola. Rota a diario: hush.log.2026-08-02, y los ficheros
+rem antiguos no se borran solos.
+set HUSH_LOG_FILE=C:\HushServer\logs\hush.log
+
 rem --- Correo ----------------------------------------------------------------
 rem Sin esto nadie puede verificar su cuenta ni recuperar la contrasena.
 set HUSH_SMTP_HOST=192.168.210.101

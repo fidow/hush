@@ -34,6 +34,13 @@ contraseña, así que es obligatorio que funcione.
 escritura a la cuenta que ejecutará el proceso. Ese fichero contiene las
 cuentas y el archivo cifrado: **es lo único que hay que respaldar**.
 
+La ruta del log se define aparte, en `HUSH_LOG_FILE`, y admite cualquier
+ubicación absoluta —otra unidad o un recurso de red— con la carpeta creada
+automáticamente. Rota a diario (`hush.log.2026-08-02`) y **los ficheros
+antiguos no se borran solos**: si el volumen es pequeño, conviene una tarea de
+limpieza. Sin esta variable el servidor escribe por consola, que como tarea
+programada significa perder el registro.
+
 **4. Arrancarlo al iniciar la máquina** y que se reinicie si muere.
 `install-service.ps1` lo hace con el Programador de tareas; si preferís NSSM o
 cualquier otro sistema, vale igual. No es un servicio de Windows nativo: es un

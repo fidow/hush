@@ -46,6 +46,7 @@ register a different username in each, add the other user as contact and chat.
 | `HUSH_ADDR` | `127.0.0.1:8080` | Listen address |
 | `HUSH_DB` | `sqlite://hush.sqlite3?mode=rwc` | SQLite database URL |
 | `HUSH_LOG` | `info` | Log level; set `debug` to trace users/messages (toggleable debug mode) |
+| `HUSH_LOG_FILE` | *(unset)* | Write the log to this path instead of the console, rotated daily. Any absolute path, including another drive or a share; the directory is created |
 | `HUSH_SMTP_HOST` | *(unset)* | SMTP relay for verification emails; unset = codes are logged instead |
 | `HUSH_SMTP_PORT` | `25` | SMTP port |
 | `HUSH_SMTP_FROM` | `hush@localhost` | From address; a bare address gets the `Hush <…>` display name |
