@@ -1,5 +1,7 @@
 /target
 /.cargo/config.toml
+# The binary is built, not committed; the rest of deploy/ is.
+deploy/windows/hush-server.exe
 node_modules/
 dist/
 *.sqlite
