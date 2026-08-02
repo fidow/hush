@@ -21,7 +21,7 @@ rem --- Base de datos ---------------------------------------------------------
 rem Ruta del fichero SQLite. La carpeta debe existir y la cuenta que ejecuta el
 rem servicio necesita permiso de escritura. Aqui viven las cuentas, la cola de
 rem mensajes y el archivo cifrado: es lo unico que hay que respaldar.
-set HUSH_DB=sqlite://C:/HushServer/data/hush.sqlite3?mode=rwc
+set HUSH_DB=sqlite://C:/hush/data/hush.sqlite3?mode=rwc
 
 rem --- Registro --------------------------------------------------------------
 rem info en produccion. Con debug se registra quien escribe a quien y cuando,
@@ -33,7 +33,7 @@ rem sin esto el registro se pierde. Vale cualquier ruta absoluta: otra unidad
 rem (D:\logs\hush.log) o un recurso de red (\\servidor\logs\hush.log). La
 rem carpeta se crea sola. Rota a diario: hush.log.2026-08-02, y los ficheros
 rem antiguos no se borran solos.
-set HUSH_LOG_FILE=C:\HushServer\logs\hush.log
+set HUSH_LOG_FILE=C:\hush\logs\hush.log
 
 rem --- Correo ----------------------------------------------------------------
 rem Sin esto nadie puede verificar su cuenta ni recuperar la contrasena.

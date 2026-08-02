@@ -24,7 +24,7 @@ runtime ni servicio adicional.
 
 ## Lo que hay que hacer en la máquina
 
-**1. Copiar el paquete** a una carpeta, por ejemplo `C:\HushServer\`.
+**1. Copiar el paquete** a una carpeta, por ejemplo `C:\hush\`.
 
 **2. Editar `hush-server.cmd`**: la ruta de la base de datos y los datos del
 relay SMTP. Sin SMTP nadie puede verificar su cuenta ni recuperar la
