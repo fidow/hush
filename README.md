@@ -4,8 +4,9 @@ Private 1-to-1 messaging with **post-quantum end-to-end encryption**. The server
 is a dumb relay/mailbox: it stores public key bundles and queues of opaque
 encrypted blobs — it can never read message contents.
 
-**[hush.villasante.es](https://hush.villasante.es)** — the live server, and
-where the Windows client is downloaded from.
+**[hush.villasante.es](https://hush.villasante.es)** — the live server the
+client talks to. The Windows client is published in
+[releases](https://github.com/fidow/hush/releases).
 
 ## Architecture
 
