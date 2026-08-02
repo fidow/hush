@@ -327,6 +327,26 @@ impl LocalDb {
         })
     }
 
+    /// Removes a message from the local history.
+    pub fn delete_message(&self, id: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute("DELETE FROM messages WHERE id = ?1", [id])
+                .map(|_| ())
+        })
+    }
+
+    /// Who a message was exchanged with, and whether we sent it.
+    pub fn message_peer(&self, id: &str) -> Result<Option<(String, bool)>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT contact, mine FROM messages WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0)),
+            )
+            .optional()
+        })
+    }
+
     pub fn history(&self, contact: &str) -> Result<Vec<StoredMessage>> {
         self.with(|c| {
             c.prepare(

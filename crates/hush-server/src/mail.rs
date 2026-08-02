@@ -88,7 +88,7 @@ impl MailConfig {
             .header(ContentType::TEXT_PLAIN)
             .body(body.to_string())?;
 
-        tracing::info!("enviando email a {to} vía {}:{}", self.host, self.port);
+        tracing::info!("sending email to {to} via {}:{}", self.host, self.port);
         let mut builder = if self.starttls {
             SmtpTransport::starttls_relay(&self.host)?
         } else {

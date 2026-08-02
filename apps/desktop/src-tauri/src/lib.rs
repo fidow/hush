@@ -2,11 +2,18 @@
 //! hush-core engine actor; the webview only ever sees the local user's own
 //! plaintext.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use hush_core::{ClientEvent, ContactEntry, HushClient, ProfileInfo, StoredMessage};
-use tauri::{Emitter, Manager, State};
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{TrayIconBuilder, TrayIconEvent};
+use tauri::{Emitter, Manager, State, WindowEvent};
+
+/// Whether closing the window hides the app instead of quitting it. Lives in
+/// Rust because the close handler runs there, but the choice is the user's
+/// and the UI stores it.
+struct CloseToTray(Arc<AtomicBool>);
 
 /// The account stored on this device, if any.
 #[tauri::command]
@@ -147,6 +154,9 @@ async fn connect(
                 ClientEvent::ContactsChanged => {
                     let _ = app.emit("hush://contacts", ());
                 }
+                ClientEvent::MessageDeleted { id } => {
+                    let _ = app.emit("hush://deleted", serde_json::json!({ "id": id }));
+                }
                 ClientEvent::Receipt { id, state, at } => {
                     let _ = app.emit(
                         "hush://receipt",
@@ -197,10 +207,32 @@ async fn accept_contact(client: State<'_, HushClient>, username: String) -> Resu
     client.accept_contact(&username).await
 }
 
-/// Rejects a request, cancels one we sent, or removes a contact.
+/// Rejects a request, cancels one we sent, removes a contact, or unblocks.
 #[tauri::command]
 async fn remove_contact(client: State<'_, HushClient>, username: String) -> Result<(), String> {
     client.remove_contact(&username).await
+}
+
+/// Blocks a peer: they stop being a contact and cannot reach us again.
+#[tauri::command]
+async fn block_contact(client: State<'_, HushClient>, username: String) -> Result<(), String> {
+    client.block_contact(&username).await
+}
+
+/// Deletes a message; with `forEveryone` the other side deletes it too.
+#[tauri::command]
+async fn delete_message(
+    client: State<'_, HushClient>,
+    id: String,
+    for_everyone: bool,
+) -> Result<(), String> {
+    client.delete_message(&id, for_everyone).await
+}
+
+/// Whether closing the window hides the app to the tray instead of quitting.
+#[tauri::command]
+fn set_close_to_tray(state: State<'_, CloseToTray>, enabled: bool) {
+    state.0.store(enabled, Ordering::Relaxed);
 }
 
 /// The contact list with state and presence for each entry.
@@ -246,6 +278,42 @@ async fn get_history(
     client.history(&contact).await
 }
 
+/// Tray icon with a minimal menu. Clicking it brings the window back, which
+/// is what people try first after closing to the tray.
+fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
+    let open = MenuItem::with_id(app, "open", "Open Hush", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&open, &quit])?;
+
+    TrayIconBuilder::with_id("hush")
+        .icon(app.default_window_icon().expect("bundled icon").clone())
+        .tooltip("Hush")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "open" => show_main_window(app),
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click { button, .. } = event {
+                if button == tauri::tray::MouseButton::Left {
+                    show_main_window(tray.app_handle());
+                }
+            }
+        })
+        .build(app)?;
+    Ok(())
+}
+
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -261,6 +329,24 @@ pub fn run() {
             };
             app.manage(HushClient::spawn(dir.join(file)));
             app.manage(Arc::new(AtomicU64::new(0)));
+
+            // Closing hides to the tray by default, so messages keep arriving
+            // and notifications still work. The UI can turn that off.
+            let close_to_tray = Arc::new(AtomicBool::new(true));
+            app.manage(CloseToTray(close_to_tray.clone()));
+            build_tray(app.handle())?;
+
+            if let Some(window) = app.get_webview_window("main") {
+                let handle = window.clone();
+                window.on_window_event(move |event| {
+                    if let WindowEvent::CloseRequested { api, .. } = event {
+                        if close_to_tray.load(Ordering::Relaxed) {
+                            api.prevent_close();
+                            let _ = handle.hide();
+                        }
+                    }
+                });
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -274,6 +360,9 @@ pub fn run() {
             request_contact,
             accept_contact,
             remove_contact,
+            block_contact,
+            delete_message,
+            set_close_to_tray,
             get_contacts,
             get_history,
             mark_read,

@@ -18,6 +18,8 @@ use crate::{ApiClient, ContactEntry, Engine, IncomingMessage, ServerEvent};
 #[derive(Clone, Debug)]
 pub enum ClientEvent {
     Message(DecryptedMessage),
+    /// The other side deleted a message for everyone.
+    MessageDeleted { id: String },
     /// The contact list changed (a request arrived, was accepted, …).
     ContactsChanged,
     /// One of our messages was delivered or read.
@@ -124,9 +126,20 @@ enum Command {
         username: String,
         reply: oneshot::Sender<Result<(), String>>,
     },
-    /// Rejects a request, cancels ours, or removes an existing contact.
+    /// Rejects a request, cancels ours, removes a contact, or lifts a block.
     RemoveContact {
         username: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    BlockContact {
+        username: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Deletes a message locally and, when `for_everyone`, asks the other
+    /// side to delete their copy too.
+    DeleteMessage {
+        id: String,
+        for_everyone: bool,
         reply: oneshot::Sender<Result<(), String>>,
     },
     Contacts {
@@ -352,6 +365,25 @@ impl HushClient {
         let username = username.to_string();
         self.request(|reply| Command::RemoveContact { username, reply })
             .await
+    }
+
+    /// Blocks a peer: they stop being a contact and cannot reach us again.
+    pub async fn block_contact(&self, username: &str) -> Result<(), String> {
+        let username = username.to_string();
+        self.request(|reply| Command::BlockContact { username, reply })
+            .await
+    }
+
+    /// Deletes a message. With `for_everyone` the other side is asked to
+    /// delete their copy as well.
+    pub async fn delete_message(&self, id: &str, for_everyone: bool) -> Result<(), String> {
+        let id = id.to_string();
+        self.request(|reply| Command::DeleteMessage {
+            id,
+            for_everyone,
+            reply,
+        })
+        .await
     }
 
     /// The contact list, refreshed from the server when reachable.
@@ -685,6 +717,34 @@ impl Actor {
         Ok(stored)
     }
 
+    /// Deletes a message here and, for `for_everyone`, tells the other side.
+    ///
+    /// The instruction travels as an ordinary encrypted message with
+    /// `kind = "delete"`, so the server never learns which message was
+    /// deleted, and it queues like any other if they are offline.
+    async fn handle_delete(&mut self, id: &str, for_everyone: bool) -> anyhow::Result<()> {
+        let peer = self
+            .db
+            .message_peer(id)?
+            .ok_or_else(|| anyhow::anyhow!("message_not_found"))?;
+        let (contact, mine) = peer;
+        if for_everyone && !mine {
+            anyhow::bail!("not_your_message");
+        }
+
+        self.db.delete_message(id)?;
+        // Drop it from our archive too, or restoring history would bring it
+        // back on the next device.
+        if let Some(session) = self.session.as_ref() {
+            let _ = session.api.delete_archive_entry(id).await;
+        }
+
+        if for_everyone {
+            self.handle_send(&contact, "delete", id).await?;
+        }
+        Ok(())
+    }
+
     /// Reports the unread messages from `contact` as read, both locally and
     /// to the sender.
     async fn handle_mark_read(&self, contact: &str) -> Result<(), String> {
@@ -743,6 +803,22 @@ impl Actor {
             Ok(plain) => {
                 let _ = session.api.ack_message(&msg.id).await;
                 let (kind, text) = decode_content(&plain);
+
+                // A control message, not something to show: the sender
+                // deleted a message and wants our copy gone too.
+                if kind == "delete" {
+                    let _ = self.db.delete_message(&text);
+                    if let Some(session) = self.session.as_ref() {
+                        let _ = session.api.delete_archive_entry(&text).await;
+                    }
+                    if let Some(events) = &self.events {
+                        let _ = events
+                            .send(ClientEvent::MessageDeleted { id: text })
+                            .await;
+                    }
+                    return None;
+                }
+
                 let stored = StoredMessage {
                     id: msg.id,
                     contact: msg.sender.clone(),
@@ -930,6 +1006,21 @@ async fn actor(db_path: PathBuf, mut commands: mpsc::Receiver<Command>) {
                         actor.sync_contacts().await;
                     }
                     let _ = reply.send(result);
+                }
+                Some(Command::BlockContact { username, reply }) => {
+                    let username = username.to_lowercase();
+                    let result = match actor.session.as_ref() {
+                        None => Err("no_session".to_string()),
+                        Some(s) => s.api.block_contact(&username).await.map_err(|e| e.to_string()),
+                    };
+                    if result.is_ok() {
+                        actor.sync_contacts().await;
+                    }
+                    let _ = reply.send(result);
+                }
+                Some(Command::DeleteMessage { id, for_everyone, reply }) => {
+                    let result = actor.handle_delete(&id, for_everyone).await;
+                    let _ = reply.send(result.map_err(|e| e.to_string()));
                 }
                 Some(Command::Contacts { reply }) => {
                     let _ = reply.send(actor.contacts().await);

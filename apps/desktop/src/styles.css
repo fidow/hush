@@ -380,8 +380,33 @@ button:disabled {
   flex-wrap: wrap;
 }
 
-#contact-list li.state-outgoing {
+#contact-list li.state-outgoing,
+#contact-list li.state-blocked {
   opacity: 0.65;
+}
+
+#contact-list li.state-blocked {
+  cursor: default;
+}
+
+/* ---- Diálogos de confirmación ---- */
+.confirm-card {
+  width: 24rem;
+}
+
+.confirm-actions {
+  display: flex;
+  gap: 0.6rem;
+  justify-content: flex-end;
+  margin-top: 0.4rem;
+}
+
+button.danger {
+  background: #c94a4a;
+}
+
+button.danger:hover {
+  background: #a93b3b;
 }
 
 .contact-actions {

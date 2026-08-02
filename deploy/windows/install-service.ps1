@@ -55,10 +55,28 @@ Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger `
 Start-ScheduledTask -TaskName $taskName
 Start-Sleep -Seconds 3
 
-try {
-    Invoke-WebRequest "http://127.0.0.1:8080/" -TimeoutSec 10 -UseBasicParsing | Out-Null
+# Comprobacion real de que arranco. Falla en vez de avisar: una tarea
+# registrada que nunca levanta el proceso parece instalada y no lo esta.
+$listening = $false
+foreach ($attempt in 1..10) {
+    Start-Sleep -Seconds 2
+    try {
+        Invoke-WebRequest "http://127.0.0.1:8080/" -TimeoutSec 5 -UseBasicParsing | Out-Null
+        $listening = $true
+        break
+    } catch {}
+}
+
+if ($listening) {
     Write-Host "Hush server en marcha y respondiendo en 127.0.0.1:8080." -ForegroundColor Green
-} catch {
-    Write-Warning "La tarea se registro pero el servidor no responde todavia."
-    Write-Warning "Revisa el Visor de eventos y prueba a ejecutar hush-server.cmd a mano para ver el error."
+} else {
+    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+    throw @"
+El servidor no responde en 127.0.0.1:8080; se ha quitado la tarea para no
+dejarla registrada sin funcionar.
+
+Ejecuta hush-server.cmd a mano en esta carpeta para ver el error. Lo mas
+habitual es una ruta de HUSH_DB o HUSH_LOG_FILE en la que la cuenta del
+servicio no puede escribir, o el puerto 8080 ya ocupado.
+"@
 }

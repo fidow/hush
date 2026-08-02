@@ -55,5 +55,9 @@ rem --- NUNCA en produccion ---------------------------------------------------
 rem HUSH_ECHO_CODE devolveria los codigos de verificacion en la respuesta HTTP.
 rem El servidor ya lo ignora cuando hay SMTP configurado, pero no lo definas.
 
+rem Ruta completa a proposito: con NoDefaultCurrentDirectoryInExePath=1 (lo
+rem habitual en servidores endurecidos) cmd no busca ejecutables en el
+rem directorio actual, asi que un "hush-server.exe" suelto falla aunque se
+rem haya hecho el cd de arriba.
 cd /d "%~dp0"
-hush-server.exe
+"%~dp0hush-server.exe"

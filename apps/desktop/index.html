@@ -198,6 +198,10 @@
           <span data-i18n="settings.notifications"></span>
         </label>
         <label class="toggle">
+          <input type="checkbox" id="settings-tray" />
+          <span data-i18n="settings.closeToTray"></span>
+        </label>
+        <label class="toggle">
           <input type="checkbox" id="settings-sound" />
           <span data-i18n="settings.sound"></span>
         </label>
@@ -249,6 +253,36 @@
         <div class="img-preview-actions">
           <button type="button" id="img-cancel" class="secondary" data-i18n="image.cancel"></button>
           <button type="button" id="img-send" data-i18n="image.send"></button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Borrar un mensaje: para mí o para todos -->
+    <div id="delete-dialog" class="overlay hidden">
+      <div class="settings-card confirm-card">
+        <header class="settings-header">
+          <h2 data-i18n="delete.title"></h2>
+          <button type="button" id="delete-close" class="icon-btn" data-i18n-title="settings.close">✕</button>
+        </header>
+        <p class="hint" id="delete-note"></p>
+        <div class="confirm-actions">
+          <button type="button" id="delete-mine" data-i18n="delete.forMe" class="secondary"></button>
+          <button type="button" id="delete-everyone" data-i18n="delete.forEveryone" class="danger"></button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Confirmar una acción sobre un contacto -->
+    <div id="confirm-dialog" class="overlay hidden">
+      <div class="settings-card confirm-card">
+        <header class="settings-header">
+          <h2 id="confirm-title"></h2>
+          <button type="button" id="confirm-close" class="icon-btn" data-i18n-title="settings.close">✕</button>
+        </header>
+        <p class="hint" id="confirm-note"></p>
+        <div class="confirm-actions">
+          <button type="button" id="confirm-cancel" class="secondary" data-i18n="confirm.cancel"></button>
+          <button type="button" id="confirm-ok" class="danger"></button>
         </div>
       </div>
     </div>

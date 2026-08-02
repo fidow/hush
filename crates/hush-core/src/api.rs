@@ -56,7 +56,13 @@ pub struct ApiClient {
 impl ApiClient {
     pub fn new(base: impl Into<String>) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            // Identify ourselves: reqwest sends no User-Agent by default, and
+            // filters in front of a server routinely reject requests that
+            // arrive without one.
+            http: reqwest::Client::builder()
+                .user_agent(concat!("Hush/", env!("CARGO_PKG_VERSION")))
+                .build()
+                .expect("HTTP client builds with defaults"),
             base: base.into(),
             token: None,
         }
@@ -351,6 +357,23 @@ impl ApiClient {
             .json()
             .await?;
         Ok(body["state"].as_str().unwrap_or("outgoing").to_string())
+    }
+
+    /// Blocks a peer: they stop being a contact and cannot reach us again.
+    pub async fn block_contact(&self, peer: &str) -> Result<()> {
+        let req = self.auth(
+            self.http
+                .post(format!("{}/v1/contacts/{peer}/block", self.base)),
+        )?;
+        Self::check(req.send().await.map_err(Self::conn_err)?).await?;
+        Ok(())
+    }
+
+    /// Removes one entry from our history archive.
+    pub async fn delete_archive_entry(&self, id: &str) -> Result<()> {
+        let req = self.auth(self.http.delete(format!("{}/v1/archive/{id}", self.base)))?;
+        Self::check(req.send().await.map_err(Self::conn_err)?).await?;
+        Ok(())
     }
 
     pub async fn accept_contact(&self, peer: &str) -> Result<()> {

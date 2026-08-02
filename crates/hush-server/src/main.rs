@@ -110,7 +110,16 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    let db_url = std::env::var("HUSH_DB").unwrap_or_else(|_| "sqlite://hush.sqlite3?mode=rwc".into());
+    // Required on purpose. Defaulting to a file in the working directory
+    // means a misconfigured deployment starts happily against an empty
+    // database in an arbitrary place, and nobody notices until the accounts
+    // are gone.
+    let db_url = std::env::var("HUSH_DB").map_err(|_| {
+        anyhow::anyhow!(
+            "HUSH_DB is not set. Point it at the database file, e.g.\n\
+             \x20 HUSH_DB=sqlite://C:/hush/data/hush.sqlite3?mode=rwc"
+        )
+    })?;
     let addr = std::env::var("HUSH_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".into());
 
     let public = !addr.starts_with("127.") && !addr.starts_with("localhost");
@@ -118,17 +127,17 @@ async fn main() -> anyhow::Result<()> {
         // Loud, because each of these silently weakens a deployment that is
         // reachable from outside the machine.
         if std::env::var("HUSH_ECHO_CODE").is_ok() {
-            tracing::warn!("HUSH_ECHO_CODE está definida: solo para desarrollo local");
+            tracing::warn!("HUSH_ECHO_CODE is set: development only");
         }
         if mail::config_missing() {
             tracing::warn!(
-                "SMTP sin configurar: nadie podrá verificar su cuenta (define HUSH_SMTP_HOST)"
+                "SMTP not configured: nobody can verify their account (set HUSH_SMTP_HOST)"
             );
         }
         if std::env::var("HUSH_LOG").is_ok_and(|v| v.contains("debug")) {
-            tracing::warn!("HUSH_LOG=debug registra metadatos de mensajes; usa info en producción");
+            tracing::warn!("HUSH_LOG=debug records message metadata; use info in production");
         }
-        tracing::info!("recuerda terminar TLS delante del servidor (proxy inverso en :443)");
+        tracing::info!("remember to terminate TLS in front of the server (reverse proxy on :443)");
     }
 
     let pool = hush_server::connect_db(&db_url).await?;

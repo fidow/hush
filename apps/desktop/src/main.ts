@@ -136,7 +136,7 @@ function renderContactList() {
   list.replaceChildren();
 
   const entries = [...contacts.entries()];
-  const order = { incoming: 0, outgoing: 1, accepted: 2 } as Record<string, number>;
+  const order = { incoming: 0, outgoing: 1, accepted: 2, blocked: 3 } as Record<string, number>;
   entries.sort(
     ([an, a], [bn, b]) =>
       (order[a.state] ?? 3) - (order[b.state] ?? 3) || an.localeCompare(bn),
@@ -144,12 +144,22 @@ function renderContactList() {
 
   let lastSection: string | null = null;
   for (const [name, contact] of entries) {
-    const section = contact.state === "accepted" ? "accepted" : "requests";
+    const section =
+      contact.state === "accepted"
+        ? "accepted"
+        : contact.state === "blocked"
+          ? "blocked"
+          : "requests";
     if (section !== lastSection) {
       const header = document.createElement("li");
       header.className = "contact-section";
-      header.textContent =
-        section === "requests" ? t("contacts.requests") : t("contacts.title");
+      header.textContent = t(
+        section === "requests"
+          ? "contacts.requests"
+          : section === "blocked"
+            ? "contacts.blocked"
+            : "contacts.title",
+      );
       list.appendChild(header);
       lastSection = section;
     }
@@ -210,6 +220,17 @@ function contactItem(name: string, contact: Contact): HTMLElement {
     li.addEventListener("click", () => selectContact(name));
   }
   return li;
+}
+
+/// Removes, unblocks or blocks a contact, then refreshes the list.
+async function contactAction(name: string, command: "remove_contact" | "block_contact") {
+  try {
+    await invoke(command, { username: name });
+    if (current === name) closeConversation();
+    await refreshContacts();
+  } catch (err) {
+    toast(tError(err));
+  }
 }
 
 async function respondToRequest(name: string, accept: boolean) {
@@ -550,6 +571,7 @@ async function enterChat(profile: ProfileInfo) {
 async function boot() {
   applyTheme(currentTheme());
   applyFontSize(currentFontSize());
+  applyCloseToTray(closeToTray());
   populateServers();
   populateLanguages();
   populateThemes();
@@ -745,6 +767,7 @@ $("#settings-btn").addEventListener("click", () => {
   void fillAbout();
   ($("#settings-notifications") as HTMLInputElement).checked = notificationsEnabled();
   ($("#settings-sound") as HTMLInputElement).checked = soundEnabled();
+  ($("#settings-tray") as HTMLInputElement).checked = closeToTray();
   $("#settings-error").textContent = "";
   // The key is only revealed on demand, never just by opening settings.
   $("#recovery-code").textContent = HIDDEN_KEY;
@@ -773,6 +796,24 @@ async function fillAbout() {
 $("#settings-notifications").addEventListener("change", (e) => {
   setNotificationsEnabled((e.target as HTMLInputElement).checked);
 });
+
+// ---- Cerrar a la bandeja ----
+
+const TRAY_KEY = "hush-close-to-tray";
+
+function closeToTray(): boolean {
+  return localStorage.getItem(TRAY_KEY) !== "off";
+}
+
+/// The close handler lives in Rust, so the choice has to be pushed there.
+function applyCloseToTray(enabled: boolean) {
+  localStorage.setItem(TRAY_KEY, enabled ? "on" : "off");
+  void invoke("set_close_to_tray", { enabled }).catch(() => {});
+}
+
+$("#settings-tray").addEventListener("change", (e) =>
+  applyCloseToTray((e.target as HTMLInputElement).checked),
+);
 
 $("#settings-sound").addEventListener("change", (e) => {
   const on = (e.target as HTMLInputElement).checked;
@@ -1276,6 +1317,81 @@ $("#emoji-btn").addEventListener("click", () => {
 
 // ---- Visor de imágenes ----
 
+// ---- Borrar mensajes ----
+
+let pendingDelete: string | null = null;
+
+function askDelete(id: string) {
+  const msg = current
+    ? contacts.get(current)?.messages.find((m) => m.id === id)
+    : undefined;
+  if (!msg) return;
+  pendingDelete = id;
+  // Only our own messages can be withdrawn from the other side.
+  ($("#delete-everyone") as HTMLButtonElement).classList.toggle("hidden", !msg.mine);
+  $("#delete-note").textContent = t(msg.mine ? "delete.note" : "delete.noteTheirs");
+  $("#delete-dialog").classList.remove("hidden");
+}
+
+function closeDeleteDialog() {
+  pendingDelete = null;
+  $("#delete-dialog").classList.add("hidden");
+}
+
+async function confirmDelete(forEveryone: boolean) {
+  if (!pendingDelete) return;
+  const id = pendingDelete;
+  closeDeleteDialog();
+  try {
+    await invoke("delete_message", { id, forEveryone });
+    removeMessageLocally(id);
+  } catch (err) {
+    toast(tError(err));
+  }
+}
+
+function removeMessageLocally(id: string) {
+  for (const contact of contacts.values()) {
+    const index = contact.messages.findIndex((m) => m.id === id);
+    if (index !== -1) {
+      contact.messages.splice(index, 1);
+      renderMessages();
+      return;
+    }
+  }
+}
+
+$("#delete-close").addEventListener("click", closeDeleteDialog);
+$("#delete-mine").addEventListener("click", () => void confirmDelete(false));
+$("#delete-everyone").addEventListener("click", () => void confirmDelete(true));
+
+listen<{ id: string }>("hush://deleted", ({ payload }) => removeMessageLocally(payload.id));
+
+// ---- Confirmación genérica ----
+
+let confirmAction: (() => void) | null = null;
+
+function askConfirm(title: string, note: string, okLabel: string, action: () => void) {
+  $("#confirm-title").textContent = title;
+  $("#confirm-note").textContent = note;
+  $("#confirm-ok").textContent = okLabel;
+  confirmAction = action;
+  $("#confirm-dialog").classList.remove("hidden");
+}
+
+function closeConfirm() {
+  confirmAction = null;
+  $("#confirm-dialog").classList.add("hidden");
+}
+
+$("#confirm-close").addEventListener("click", closeConfirm);
+$("#confirm-cancel").addEventListener("click", closeConfirm);
+$("#confirm-ok").addEventListener("click", () => {
+  const action = confirmAction;
+  closeConfirm();
+  action?.();
+});
+
 // ---- Información de un mensaje ----
 
 function formatMoment(timestamp: number | null | undefined): string {
@@ -1476,6 +1592,7 @@ document.addEventListener("contextmenu", (e) => {
         ]
       : [{ label: t("ctx.copyText"), action: () => copyText(bubble.textContent ?? "") }];
     items.push({ label: t("ctx.info"), action: () => showMessageInfo(id) });
+    items.push({ label: t("ctx.delete"), action: () => askDelete(id) });
     showContextMenu(items, e.clientX, e.clientY);
     return;
   }
@@ -1483,11 +1600,38 @@ document.addEventListener("contextmenu", (e) => {
   const contactLi = target.closest<HTMLElement>("#contact-list li");
   if (contactLi?.dataset.name) {
     const name = contactLi.dataset.name;
-    showContextMenu(
-      [{ label: t("ctx.copyUser"), action: () => copyText(name) }],
-      e.clientX,
-      e.clientY,
-    );
+    const label = contactLabel(name);
+    const blocked = contacts.get(name)?.state === "blocked";
+    const items: CtxItem[] = [{ label: t("ctx.copyUser"), action: () => copyText(name) }];
+
+    if (blocked) {
+      items.push({
+        label: t("ctx.unblock"),
+        action: () => void contactAction(name, "remove_contact"),
+      });
+    } else {
+      items.push({
+        label: t("ctx.removeContact"),
+        action: () =>
+          askConfirm(
+            t("confirm.removeTitle"),
+            t("confirm.removeNote").replace("{who}", label),
+            t("ctx.removeContact"),
+            () => void contactAction(name, "remove_contact"),
+          ),
+      });
+      items.push({
+        label: t("ctx.block"),
+        action: () =>
+          askConfirm(
+            t("confirm.blockTitle"),
+            t("confirm.blockNote").replace("{who}", label),
+            t("ctx.block"),
+            () => void contactAction(name, "block_contact"),
+          ),
+      });
+    }
+    showContextMenu(items, e.clientX, e.clientY);
   }
 });
 

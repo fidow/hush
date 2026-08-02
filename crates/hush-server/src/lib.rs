@@ -22,6 +22,12 @@ const MAX_ARCHIVE_ENTRIES: i64 = 200_000;
 const MAX_PREKEYS_PER_UPLOAD: usize = 200;
 const MAX_FIELD_BYTES: usize = 64 * 1024;
 const MAX_ALIAS_BYTES: usize = 64;
+/// Encrypted envelopes carrying inline images can be several MB.
+const MAX_BODY_BYTES: usize = 15 * 1024 * 1024;
+/// Contact requests one account may send per hour, and how many of those may
+/// name someone who does not exist.
+const MAX_CONTACT_REQUESTS_PER_HOUR: usize = 20;
+const MAX_UNKNOWN_LOOKUPS_PER_HOUR: usize = 5;
 /// Presence a user can choose. Being reachable at all is derived from the
 /// live SSE connections, so "offline" is reported, never set.
 const SETTABLE_STATUSES: [&str; 3] = ["online", "away", "busy"];
@@ -108,10 +114,12 @@ CREATE TABLE IF NOT EXISTS deliveries (
 -- Contact list. Every link is stored from both sides so each account can be
 -- listed on its own: A sees 'outgoing' while B sees 'incoming', and both
 -- flip to 'accepted' together.
+-- No CHECK on `state`: it is validated in code, and a constraint here would
+-- mean rebuilding the table every time a state is added.
 CREATE TABLE IF NOT EXISTS contacts (
     owner      TEXT NOT NULL REFERENCES accounts(username),
     peer       TEXT NOT NULL REFERENCES accounts(username),
-    state      TEXT NOT NULL CHECK (state IN ('incoming', 'outgoing', 'accepted')),
+    state      TEXT NOT NULL,
     created_at INTEGER NOT NULL,
     PRIMARY KEY (owner, peer)
 );
@@ -177,6 +185,36 @@ pub async fn connect_db(url: &str) -> anyhow::Result<SqlitePool> {
             .execute(&pool)
             .await;
     }
+
+    // Blocking added a contact state, and the original table pinned the
+    // allowed values with a CHECK. SQLite cannot drop a constraint, so the
+    // table is rebuilt once, keeping its rows.
+    let contacts_sql: Option<String> = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'contacts'",
+    )
+    .fetch_optional(&pool)
+    .await?
+    .flatten();
+    if contacts_sql.is_some_and(|sql| sql.contains("CHECK")) {
+        tracing::info!("migrating the contacts table to allow blocking");
+        sqlx::raw_sql(
+            "BEGIN;
+             CREATE TABLE contacts_migrated (
+                 owner      TEXT NOT NULL REFERENCES accounts(username),
+                 peer       TEXT NOT NULL REFERENCES accounts(username),
+                 state      TEXT NOT NULL,
+                 created_at INTEGER NOT NULL,
+                 PRIMARY KEY (owner, peer)
+             );
+             INSERT INTO contacts_migrated SELECT owner, peer, state, created_at FROM contacts;
+             DROP TABLE contacts;
+             ALTER TABLE contacts_migrated RENAME TO contacts;
+             COMMIT;",
+        )
+        .execute(&pool)
+        .await?;
+    }
+
     Ok(pool)
 }
 
@@ -203,15 +241,21 @@ pub fn app(db: SqlitePool) -> Router {
             post(request_contact).delete(remove_contact),
         )
         .route("/v1/contacts/{peer}/accept", post(accept_contact))
+        .route("/v1/contacts/{peer}/block", post(block_contact))
         .route("/v1/keys", put(upload_keys))
         .route("/v1/keys/{username}", get(fetch_bundle))
         .route("/v1/messages/stream", get(message_stream))
         .route("/v1/messages/{target}", put(send_message).delete(ack_message))
         .route("/v1/messages/{id}/read", post(mark_read))
         .route("/v1/archive", get(list_archive))
-        .route("/v1/archive/{id}", put(put_archive))
+        .route(
+            "/v1/archive/{id}",
+            put(put_archive).delete(delete_archive_entry),
+        )
         // Encrypted envelopes carrying inline images can be several MB.
-        .layer(axum::extract::DefaultBodyLimit::max(15 * 1024 * 1024))
+        .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY_BYTES))
+        // Outermost, so it runs before routing: see `read_body_first`.
+        .layer(axum::middleware::from_fn(read_body_first))
         .with_state(state)
 }
 
@@ -322,6 +366,39 @@ fn now() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as i64
+}
+
+/// Reads the request body before anything else can answer.
+///
+/// Responses produced before the body is read — a 404 for an unknown route, a
+/// 401 from the auth extractor — leave the client still uploading, and the
+/// connection is then closed mid-send. A reverse proxy in front reports that
+/// as a bare 502 (Apache: `AH01084: pass request body failed`), hiding the
+/// real status: someone uploading a large image would see a gateway error
+/// instead of "session expired". Buffering first costs nothing extra, since
+/// every handler that takes a body already buffers it, and the size is capped
+/// either way.
+async fn read_body_first(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    let (parts, body) = req.into_parts();
+    match axum::body::to_bytes(body, MAX_BODY_BYTES).await {
+        Ok(bytes) => {
+            let req = axum::extract::Request::from_parts(parts, axum::body::Body::from(bytes));
+            next.run(req).await
+        }
+        // Over the cap: nothing to do but refuse. This is the one case where
+        // the body still goes unread, exactly as any server behaves.
+        Err(_) => err(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "payload_too_large",
+            "Request body too large",
+        )
+        .into_response(),
+    }
 }
 
 /// Download page. Embedded at compile time so the binary stays
@@ -502,21 +579,21 @@ async fn register(
         }
     }
 
-    tracing::info!(username = %username, email = %req.email, "cuenta creada, pendiente de verificación");
+    tracing::info!(username = %username, email = %req.email, "account created, pending verification");
     match mail::MailConfig::from_env() {
         Some(cfg) => {
             let (email, username, code) = (req.email.clone(), username.clone(), code.clone());
             tokio::task::spawn_blocking(move || {
                 match cfg.send_verification(&email, &username, &code) {
-                    Ok(()) => tracing::info!(%username, "email de verificación enviado"),
-                    Err(e) => tracing::error!(%username, "fallo enviando email de verificación: {e}"),
+                    Ok(()) => tracing::info!(%username, "verification email sent"),
+                    Err(e) => tracing::error!(%username, "failed to send verification email: {e}"),
                 }
             });
         }
         None => {
-            tracing::info!(username = %username, "SMTP no configurado; el email de verificación no se envió");
+            tracing::info!(username = %username, "SMTP not configured; verification email not sent");
             // The code itself only reaches the log in debug mode (HUSH_LOG=debug).
-            tracing::debug!(username = %username, "código de verificación (solo dev): {code}");
+            tracing::debug!(username = %username, "verification code (dev only): {code}");
         }
     }
 
@@ -550,7 +627,7 @@ async fn verify_account(
         .allow(&format!("verify:{username}"), 5, QUARTER_HOUR, now_ms)
         || !state.limits.allow(&format!("verify-ip:{ip}"), 20, QUARTER_HOUR, now_ms)
     {
-        tracing::warn!(%username, %ip, "verificación limitada por exceso de intentos");
+        tracing::warn!(%username, %ip, "verification throttled after too many attempts");
         return Err(too_many());
     }
 
@@ -600,7 +677,7 @@ async fn verify_account(
         .await
         .map_err(internal)?;
         if burn {
-            tracing::warn!(%username, "código de verificación anulado tras demasiados fallos");
+            tracing::warn!(%username, "verification code burned after too many failures");
         }
         return Err(bad_code());
     }
@@ -613,7 +690,7 @@ async fn verify_account(
     .execute(&state.db)
     .await
     .map_err(internal)?;
-    tracing::info!(username = %username, "cuenta verificada");
+    tracing::info!(username = %username, "account verified");
     Ok(Json(serde_json::json!({ "token": row.get::<String, _>(0) })))
 }
 
@@ -649,7 +726,7 @@ async fn login(
         .allow(&format!("login:{username}"), 10, QUARTER_HOUR, now_ms)
         || !state.limits.allow(&format!("login-ip:{ip}"), 30, QUARTER_HOUR, now_ms)
     {
-        tracing::warn!(%username, %ip, "login limitado por exceso de intentos");
+        tracing::warn!(%username, %ip, "login throttled after too many attempts");
         return Err(too_many());
     }
 
@@ -687,7 +764,7 @@ async fn login(
         ));
     }
     state.limits.reset(&format!("login:{username}"));
-    tracing::info!(username = %username, "login correcto");
+    tracing::info!(username = %username, "login succeeded");
     Ok(Json(serde_json::json!({ "token": row.get::<String, _>(0) })))
 }
 
@@ -719,7 +796,7 @@ async fn forgot_password(
         .await
         .map_err(internal)?;
     let Some(row) = row else {
-        tracing::info!(%username, "recuperación de contraseña para cuenta inexistente");
+        tracing::info!(%username, "password reset requested for unknown account");
         return Ok(Json(serde_json::json!({ "status": "sent" })));
     };
 
@@ -736,19 +813,19 @@ async fn forgot_password(
     .map_err(internal)?;
 
     let email: String = row.get(0);
-    tracing::info!(%username, "código de recuperación de contraseña generado");
+    tracing::info!(%username, "password reset code generated");
     match mail::MailConfig::from_env() {
         Some(cfg) => {
             let (email, username, code) = (email, username.clone(), code.clone());
             tokio::task::spawn_blocking(move || {
                 match cfg.send_password_reset(&email, &username, &code) {
-                    Ok(()) => tracing::info!(%username, "email de recuperación enviado"),
-                    Err(e) => tracing::error!(%username, "fallo enviando email de recuperación: {e}"),
+                    Ok(()) => tracing::info!(%username, "password reset email sent"),
+                    Err(e) => tracing::error!(%username, "failed to send password reset email: {e}"),
                 }
             });
         }
         None => {
-            tracing::debug!(%username, "código de recuperación (solo dev): {code}");
+            tracing::debug!(%username, "password reset code (dev only): {code}");
         }
     }
 
@@ -849,7 +926,7 @@ async fn reset_password(
     .map_err(internal)?;
 
     state.limits.reset(&format!("login:{username}"));
-    tracing::info!(%username, "contraseña restablecida");
+    tracing::info!(%username, "password reset");
     Ok(Json(serde_json::json!({ "status": "reset" })))
 }
 
@@ -902,7 +979,7 @@ async fn update_me(
             .execute(&state.db)
             .await
             .map_err(internal)?;
-        tracing::debug!(user = %auth.username, "alias actualizado");
+        tracing::debug!(user = %auth.username, "display name updated");
     }
     if let Some(status) = &req.status {
         if !SETTABLE_STATUSES.contains(&status.as_str()) {
@@ -914,7 +991,7 @@ async fn update_me(
             .execute(&state.db)
             .await
             .map_err(internal)?;
-        tracing::debug!(user = %auth.username, %status, "presencia actualizada");
+        tracing::debug!(user = %auth.username, %status, "presence updated");
     }
 
     if req.alias.is_some() || req.status.is_some() {
@@ -1046,19 +1123,50 @@ async fn request_contact(
     if peer == auth.username {
         return Err(bad_request("self_contact", "You cannot add yourself"));
     }
+    // Two separate budgets. The wide one caps spamming people who do exist;
+    // the tight one caps *misses*, which is what walking a dictionary of
+    // usernames looks like — that is the enumeration vector, since a request
+    // to an unknown account is the one call that reveals non-existence.
+    let now_ms = now();
+    if !state
+        .limits
+        .allow(&format!("contact:{}", auth.username), MAX_CONTACT_REQUESTS_PER_HOUR, HOUR, now_ms)
+    {
+        tracing::warn!(user = %auth.username, "contact requests throttled");
+        return Err(too_many());
+    }
+
     let exists = sqlx::query("SELECT 1 FROM accounts WHERE username = ? AND verified = 1")
         .bind(&peer)
         .fetch_optional(&state.db)
         .await
         .map_err(internal)?;
     if exists.is_none() {
+        if !state.limits.allow(
+            &format!("contact-miss:{}", auth.username),
+            MAX_UNKNOWN_LOOKUPS_PER_HOUR,
+            HOUR,
+            now_ms,
+        ) {
+            tracing::warn!(user = %auth.username, "possible username enumeration, throttled");
+            return Err(too_many());
+        }
         return Err(not_found());
     }
-    if !state
-        .limits
-        .allow(&format!("contact:{}", auth.username), 60, HOUR, now())
-    {
-        return Err(too_many());
+
+    // Someone who blocked us must not learn that we tried, and must not get a
+    // request. The attempt is recorded on our side only, so it simply stays
+    // pending forever from here.
+    if link_state(&state.db, &peer, &auth.username).await?.as_deref() == Some("blocked") {
+        set_link(
+            &mut *state.db.acquire().await.map_err(internal)?,
+            &auth.username,
+            &peer,
+            "outgoing",
+        )
+        .await?;
+        tracing::debug!(from = %auth.username, to = %peer, "contact request to a blocker, ignored");
+        return Ok(Json(serde_json::json!({ "state": "outgoing" })));
     }
 
     let existing = link_state(&state.db, &auth.username, &peer).await?;
@@ -1093,7 +1201,7 @@ async fn request_contact(
     .await?;
     tx.commit().await.map_err(internal)?;
 
-    tracing::info!(from = %auth.username, to = %peer, state = %resulting_state, "solicitud de contacto");
+    tracing::info!(from = %auth.username, to = %peer, state = %resulting_state, "contact request");
     notify_contacts_changed(&state, &peer).await;
     Ok(Json(serde_json::json!({ "state": resulting_state })))
 }
@@ -1113,12 +1221,49 @@ async fn accept_contact(
     set_link(&mut tx, &peer, &auth.username, "accepted").await?;
     tx.commit().await.map_err(internal)?;
 
-    tracing::info!(user = %auth.username, peer = %peer, "contacto aceptado");
+    tracing::info!(user = %auth.username, peer = %peer, "contact accepted");
     notify_contacts_changed(&state, &peer).await;
     Ok(Json(serde_json::json!({ "state": "accepted" })))
 }
 
-/// Rejects a request, cancels one we sent, or removes an existing contact.
+/// Blocks a peer: they stop being a contact, cannot message us, and a request
+/// from them never reaches us. Unblocking is just removing the contact.
+async fn block_contact(
+    auth: AuthUser,
+    State(state): State<AppState>,
+    Path(peer): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let peer = peer.to_lowercase();
+    if peer == auth.username {
+        return Err(bad_request("self_contact", "You cannot block yourself"));
+    }
+
+    let mut tx = state.db.begin().await.map_err(internal)?;
+    set_link(&mut tx, &auth.username, &peer, "blocked").await?;
+    // Their side of the link goes entirely: the block should look like the
+    // contact simply disappeared, not like a door with our name on it.
+    sqlx::query("DELETE FROM contacts WHERE owner = ? AND peer = ?")
+        .bind(&peer)
+        .bind(&auth.username)
+        .execute(&mut *tx)
+        .await
+        .map_err(internal)?;
+    // Anything already queued for us from them is dropped too.
+    sqlx::query("DELETE FROM messages WHERE recipient = ? AND sender = ?")
+        .bind(&auth.username)
+        .bind(&peer)
+        .execute(&mut *tx)
+        .await
+        .map_err(internal)?;
+    tx.commit().await.map_err(internal)?;
+
+    tracing::info!(user = %auth.username, peer = %peer, "contact blocked");
+    notify_contacts_changed(&state, &peer).await;
+    Ok(Json(serde_json::json!({ "state": "blocked" })))
+}
+
+/// Rejects a request, cancels one we sent, removes an existing contact, or
+/// lifts a block.
 async fn remove_contact(
     auth: AuthUser,
     State(state): State<AppState>,
@@ -1133,7 +1278,7 @@ async fn remove_contact(
         .execute(&state.db)
         .await
         .map_err(internal)?;
-    tracing::info!(user = %auth.username, peer = %peer, "contacto eliminado");
+    tracing::info!(user = %auth.username, peer = %peer, "contact removed");
     notify_contacts_changed(&state, &peer).await;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1221,7 +1366,7 @@ async fn upload_keys(
             .execute(&mut *tx)
             .await
             .map_err(internal)?;
-        tracing::info!(username = %auth.username, "identidad re-aprovisionada (nuevo dispositivo)");
+        tracing::info!(username = %auth.username, "identity re-provisioned (new device)");
     }
     sqlx::query("DELETE FROM one_time_prekeys WHERE username = ?")
         .bind(&auth.username)
@@ -1354,7 +1499,7 @@ async fn send_message(
         .map_err(internal)?
         .get(0);
     if queued >= MAX_QUEUED_MESSAGES {
-        tracing::warn!(to = %recipient, "cola de mensajes llena, entrega rechazada");
+        tracing::warn!(to = %recipient, "mailbox full, delivery refused");
         return Err(err(
             StatusCode::INSUFFICIENT_STORAGE,
             "mailbox_full",
@@ -1378,11 +1523,11 @@ async fn send_message(
         .await
         .map_err(internal)?;
 
-    tracing::debug!(from = %msg.sender, to = %recipient, id = %msg.id, "mensaje encolado");
+    tracing::debug!(from = %msg.sender, to = %recipient, id = %msg.id, "message queued");
     // Best-effort live push; the SSE backlog query covers anyone offline.
     if let Some(listener) = state.live.lock().await.get(&recipient) {
         let _ = listener.tx.try_send(Push::Message(msg.clone()));
-        tracing::debug!(to = %recipient, id = %msg.id, "entrega en vivo (SSE)");
+        tracing::debug!(to = %recipient, id = %msg.id, "live delivery (SSE)");
     }
     Ok(Json(SendMessageResponse { id: msg.id }))
 }
@@ -1397,7 +1542,7 @@ async fn message_stream(
         .limits
         .allow(&format!("stream:{}", auth.username), 30, MINUTE, now())
     {
-        tracing::warn!(user = %auth.username, "demasiadas reconexiones, stream rechazado");
+        tracing::warn!(user = %auth.username, "too many reconnections, stream refused");
         return Err(too_many());
     }
 
@@ -1431,7 +1576,7 @@ async fn message_stream(
     .fetch_all(&state.db)
     .await
     .map_err(internal)?;
-    tracing::debug!(user = %auth.username, backlog = rows.len(), "stream SSE abierto");
+    tracing::debug!(user = %auth.username, backlog = rows.len(), "event stream opened");
     tokio::spawn(async move {
         for r in rows {
             let msg = OutMessage {
@@ -1481,7 +1626,7 @@ impl Drop for LiveGuard {
                 let mine = map.get(&username).is_some_and(|l| l.id == id);
                 if mine {
                     map.remove(&username);
-                    tracing::debug!(user = %username, "stream SSE cerrado");
+                    tracing::debug!(user = %username, "event stream closed");
                 }
                 mine
             };
@@ -1529,7 +1674,7 @@ async fn mark_read(
             at: now(),
         });
     }
-    tracing::debug!(user = %auth.username, id = %id, "mensaje leído");
+    tracing::debug!(user = %auth.username, id = %id, "message read");
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1591,7 +1736,27 @@ async fn put_archive(
     .execute(&state.db)
     .await
     .map_err(internal)?;
-    tracing::debug!(user = %auth.username, id = %id, "entrada de historial archivada");
+    tracing::debug!(user = %auth.username, id = %id, "history entry archived");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Drops one entry from the account's history archive, so a deleted message
+/// does not come back the next time the history is restored.
+async fn delete_archive_entry(
+    auth: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    if id.len() > 128 {
+        return Err(bad_request("invalid_id", "Invalid identifier"));
+    }
+    sqlx::query("DELETE FROM archive WHERE username = ? AND id = ?")
+        .bind(&auth.username)
+        .bind(&id)
+        .execute(&state.db)
+        .await
+        .map_err(internal)?;
+    tracing::debug!(user = %auth.username, id = %id, "history entry deleted");
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1605,7 +1770,7 @@ async fn list_archive(
         .fetch_all(&state.db)
         .await
         .map_err(internal)?;
-    tracing::debug!(user = %auth.username, entries = rows.len(), "historial cifrado descargado");
+    tracing::debug!(user = %auth.username, entries = rows.len(), "encrypted history downloaded");
     let entries: Vec<serde_json::Value> = rows
         .iter()
         .map(|r| serde_json::json!({ "id": r.get::<String, _>(0), "blob": r.get::<String, _>(1) }))
@@ -1666,6 +1831,6 @@ async fn ack_message(
             });
         }
     }
-    tracing::debug!(user = %auth.username, id = %id, "mensaje confirmado y borrado");
+    tracing::debug!(user = %auth.username, id = %id, "message acknowledged and deleted");
     Ok(StatusCode::NO_CONTENT)
 }

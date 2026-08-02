@@ -151,6 +151,30 @@ const STRINGS: Record<Lang, Record<string, string>> = {
 
     "ctx.view": "Ver imagen",
     "ctx.copyImage": "Copiar imagen",
+    "ctx.delete": "Borrar mensaje",
+    "ctx.removeContact": "Eliminar contacto",
+    "ctx.block": "Bloquear",
+    "ctx.unblock": "Desbloquear",
+
+    "delete.title": "Borrar mensaje",
+    "delete.note": "¿Quieres borrarlo solo para ti o también para la otra persona?",
+    "delete.noteTheirs": "Se borrará solo en tu dispositivo; la otra persona conserva el suyo.",
+    "delete.forMe": "Borrar para mí",
+    "delete.forEveryone": "Borrar para todos",
+
+    "confirm.cancel": "Cancelar",
+    "confirm.removeTitle": "Eliminar contacto",
+    "confirm.removeNote": "{who} dejará de ser contacto y ninguno de los dos podrá escribir al otro. Tus mensajes guardados no se borran.",
+    "confirm.blockTitle": "Bloquear contacto",
+    "confirm.blockNote": "{who} no podrá escribirte ni volver a añadirte, y no sabrá que le has bloqueado. Puedes desbloquearle cuando quieras.",
+
+    "contacts.blocked": "Bloqueados",
+    "settings.closeToTray": "Al cerrar, seguir en la bandeja del sistema",
+
+    "err.message_not_found": "Ese mensaje ya no existe",
+    "err.not_your_message": "Solo puedes borrar para todos tus propios mensajes",
+    "err.payload_too_large": "El contenido es demasiado grande",
+
     "ctx.copyText": "Copiar texto",
     "ctx.info": "Información",
     "info.title": "Información del mensaje",
@@ -351,6 +375,30 @@ const STRINGS: Record<Lang, Record<string, string>> = {
 
     "ctx.view": "View image",
     "ctx.copyImage": "Copy image",
+    "ctx.delete": "Delete message",
+    "ctx.removeContact": "Remove contact",
+    "ctx.block": "Block",
+    "ctx.unblock": "Unblock",
+
+    "delete.title": "Delete message",
+    "delete.note": "Delete it just for you, or for the other person as well?",
+    "delete.noteTheirs": "It will be deleted on your device only; they keep their copy.",
+    "delete.forMe": "Delete for me",
+    "delete.forEveryone": "Delete for everyone",
+
+    "confirm.cancel": "Cancel",
+    "confirm.removeTitle": "Remove contact",
+    "confirm.removeNote": "{who} stops being a contact and neither of you can message the other. Your saved messages are kept.",
+    "confirm.blockTitle": "Block contact",
+    "confirm.blockNote": "{who} will not be able to message you or add you again, and will not know they were blocked. You can unblock them at any time.",
+
+    "contacts.blocked": "Blocked",
+    "settings.closeToTray": "Keep running in the system tray when closed",
+
+    "err.message_not_found": "That message no longer exists",
+    "err.not_your_message": "You can only delete your own messages for everyone",
+    "err.payload_too_large": "That content is too large",
+
     "ctx.copyText": "Copy text",
     "ctx.info": "Info",
     "info.title": "Message info",
