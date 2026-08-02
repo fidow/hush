@@ -147,6 +147,12 @@ async fn connect(
                 ClientEvent::ContactsChanged => {
                     let _ = app.emit("hush://contacts", ());
                 }
+                ClientEvent::Receipt { id, state } => {
+                    let _ = app.emit(
+                        "hush://receipt",
+                        serde_json::json!({ "id": id, "state": state }),
+                    );
+                }
             }
         }
         if generation.load(Ordering::SeqCst) == mine {
@@ -226,6 +232,12 @@ async fn update_me(
     client.update_me(alias, status).await
 }
 
+/// Reports every unread message from `contact` as read.
+#[tauri::command]
+async fn mark_read(client: State<'_, HushClient>, contact: String) -> Result<(), String> {
+    client.mark_read(&contact).await
+}
+
 #[tauri::command]
 async fn get_history(
     client: State<'_, HushClient>,
@@ -264,6 +276,7 @@ pub fn run() {
             remove_contact,
             get_contacts,
             get_history,
+            mark_read,
             update_me,
             get_recovery_code,
             restore_history,

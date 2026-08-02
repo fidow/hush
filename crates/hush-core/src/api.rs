@@ -35,6 +35,8 @@ pub struct ContactEntry {
 pub enum ServerEvent {
     Message(IncomingMessage),
     ContactsChanged,
+    /// A message we sent was delivered to, or read by, its recipient.
+    Receipt { id: String, state: String },
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -278,6 +280,13 @@ impl ApiClient {
         Ok(body["id"].as_str().context("no id in response")?.to_string())
     }
 
+    /// Tells the sender that we have read their message.
+    pub async fn mark_read(&self, id: &str) -> Result<()> {
+        let req = self.auth(self.http.post(format!("{}/v1/messages/{id}/read", self.base)))?;
+        Self::check(req.send().await.map_err(Self::conn_err)?).await?;
+        Ok(())
+    }
+
     pub async fn ack_message(&self, id: &str) -> Result<()> {
         let req = self.auth(self.http.delete(format!("{}/v1/messages/{id}", self.base)))?;
         Self::check(req.send().await.map_err(Self::conn_err)?).await?;
@@ -384,6 +393,14 @@ impl ApiClient {
                     let data = frame.lines().find_map(|l| l.strip_prefix("data: "));
                     let event = match (name, data) {
                         ("contacts", _) => Some(ServerEvent::ContactsChanged),
+                        ("receipt", Some(data)) => serde_json::from_str::<Value>(data)
+                            .ok()
+                            .and_then(|v| {
+                                Some(ServerEvent::Receipt {
+                                    id: v["id"].as_str()?.to_string(),
+                                    state: v["state"].as_str()?.to_string(),
+                                })
+                            }),
                         ("message", Some(data)) => serde_json::from_str::<IncomingMessage>(data)
                             .ok()
                             .map(ServerEvent::Message),

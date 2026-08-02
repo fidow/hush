@@ -95,6 +95,16 @@ CREATE TABLE IF NOT EXISTS archive (
     PRIMARY KEY (username, id)
 );
 CREATE INDEX IF NOT EXISTS idx_archive_user ON archive(username, created_at);
+-- Bookkeeping for read receipts. A message row disappears once the recipient
+-- acknowledges it, so this remembers who to tell when it is later read. Rows
+-- are dropped as soon as the read receipt goes out, and pruned by age
+-- otherwise.
+CREATE TABLE IF NOT EXISTS deliveries (
+    id         TEXT PRIMARY KEY,
+    sender     TEXT NOT NULL,
+    recipient  TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
 -- Contact list. Every link is stored from both sides so each account can be
 -- listed on its own: A sees 'outgoing' while B sees 'incoming', and both
 -- flip to 'accepted' together.
@@ -121,6 +131,8 @@ enum Push {
     Message(OutMessage),
     /// The contact list changed; the client should re-fetch it.
     ContactsChanged,
+    /// A message we sent reached the recipient's device, or was read.
+    Receipt { id: String, state: &'static str },
 }
 
 /// A live SSE listener. The id lets a stream remove *its own* entry on
@@ -190,6 +202,7 @@ pub fn app(db: SqlitePool) -> Router {
         .route("/v1/keys/{username}", get(fetch_bundle))
         .route("/v1/messages/stream", get(message_stream))
         .route("/v1/messages/{target}", put(send_message).delete(ack_message))
+        .route("/v1/messages/{id}/read", post(mark_read))
         .route("/v1/archive", get(list_archive))
         .route("/v1/archive/{id}", put(put_archive))
         // Encrypted envelopes carrying inline images can be several MB.
@@ -1407,6 +1420,9 @@ async fn message_stream(
                 .event("message")
                 .data(serde_json::to_string(&msg).expect("OutMessage serializes")),
             Push::ContactsChanged => Event::default().event("contacts").data("{}"),
+            Push::Receipt { id, state } => Event::default().event("receipt").data(
+                serde_json::json!({ "id": id, "state": state }).to_string(),
+            ),
         })
     });
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
@@ -1443,6 +1459,43 @@ impl Drop for LiveGuard {
             }
         });
     }
+}
+
+/// Reports that the caller has read a message, telling its sender.
+async fn mark_read(
+    auth: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    if id.len() > 128 {
+        return Err(bad_request("invalid_id", "Invalid identifier"));
+    }
+    let row = sqlx::query("SELECT sender FROM deliveries WHERE id = ? AND recipient = ?")
+        .bind(&id)
+        .bind(&auth.username)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(internal)?;
+    // Unknown or already reported: nothing to do, and nothing to leak.
+    let Some(row) = row else {
+        return Ok(StatusCode::NO_CONTENT);
+    };
+    let sender: String = row.get(0);
+
+    sqlx::query("DELETE FROM deliveries WHERE id = ?")
+        .bind(&id)
+        .execute(&state.db)
+        .await
+        .map_err(internal)?;
+
+    if let Some(listener) = state.live.lock().await.get(&sender) {
+        let _ = listener.tx.try_send(Push::Receipt {
+            id: id.clone(),
+            state: "read",
+        });
+    }
+    tracing::debug!(user = %auth.username, id = %id, "mensaje leído");
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Deserialize)]
@@ -1533,12 +1586,50 @@ async fn ack_message(
     if id.len() > 128 {
         return Err(bad_request("invalid_id", "Invalid identifier"));
     }
+    // Remember who sent it before the row goes, so a later read receipt still
+    // knows where to go.
+    let sender: Option<String> =
+        sqlx::query("SELECT sender FROM messages WHERE id = ? AND recipient = ?")
+            .bind(&id)
+            .bind(&auth.username)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(internal)?
+            .map(|r| r.get(0));
+
     sqlx::query("DELETE FROM messages WHERE id = ? AND recipient = ?")
         .bind(&id)
         .bind(&auth.username)
         .execute(&state.db)
         .await
         .map_err(internal)?;
+
+    if let Some(sender) = sender {
+        let now_ms = now();
+        sqlx::query(
+            "INSERT OR REPLACE INTO deliveries (id, sender, recipient, created_at)
+             VALUES (?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(&sender)
+        .bind(&auth.username)
+        .bind(now_ms)
+        .execute(&state.db)
+        .await
+        .map_err(internal)?;
+        // Opportunistic prune: receipts nobody claimed in a month.
+        let _ = sqlx::query("DELETE FROM deliveries WHERE created_at < ?")
+            .bind(now_ms - 30 * 24 * 60 * 60 * 1000)
+            .execute(&state.db)
+            .await;
+
+        if let Some(listener) = state.live.lock().await.get(&sender) {
+            let _ = listener.tx.try_send(Push::Receipt {
+                id: id.clone(),
+                state: "delivered",
+            });
+        }
+    }
     tracing::debug!(user = %auth.username, id = %id, "mensaje confirmado y borrado");
     Ok(StatusCode::NO_CONTENT)
 }

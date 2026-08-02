@@ -60,7 +60,8 @@ async fn recv_one(
         loop {
             match rx.recv().await.expect("stream closed") {
                 hush_core::ServerEvent::Message(msg) => return msg,
-                hush_core::ServerEvent::ContactsChanged => continue,
+                // Contact and receipt notifications are noise for this test.
+                _ => continue,
             }
         }
     })

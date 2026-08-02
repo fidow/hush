@@ -79,30 +79,41 @@ async fn befriend(client: &reqwest::Client, base: &str, from: &str, to: &str) {
     }
 }
 
-/// Reads the next `message` SSE event from a byte stream, with a timeout.
-async fn next_sse_message(
+/// Reads the next SSE event of the given type, with a timeout.
+async fn next_sse_event(
     stream: &mut (impl futures_util::Stream<Item = reqwest::Result<bytes::Bytes>> + Unpin),
+    want: &str,
 ) -> Value {
     let mut buf = String::new();
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let chunk = stream.next().await.expect("stream ended").expect("chunk");
             buf.push_str(&String::from_utf8_lossy(&chunk));
-            if let Some(end) = buf.find("\n\n") {
-                let event: String = buf[..end].to_string();
+            while let Some(end) = buf.find("\n\n") {
+                let frame: String = buf[..end].to_string();
                 buf.drain(..end + 2);
-                if let Some(data) = event
+                let name = frame
                     .lines()
-                    .find_map(|l| l.strip_prefix("data: "))
-                {
-                    return serde_json::from_str(data).expect("json event");
+                    .find_map(|l| l.strip_prefix("event: "))
+                    .unwrap_or("message");
+                let data = frame.lines().find_map(|l| l.strip_prefix("data: "));
+                // Keep-alive comments and other event types: keep reading.
+                if name == want {
+                    if let Some(data) = data {
+                        return serde_json::from_str(data).expect("json event");
+                    }
                 }
-                // keep-alive comment or other event type: keep reading
             }
         }
     })
     .await
     .expect("timed out waiting for SSE event")
+}
+
+async fn next_sse_message(
+    stream: &mut (impl futures_util::Stream<Item = reqwest::Result<bytes::Bytes>> + Unpin),
+) -> Value {
+    next_sse_event(stream, "message").await
 }
 
 #[tokio::test]
@@ -274,6 +285,69 @@ async fn errors_do_not_leak_internals() {
     for leak in ["sqlx", "SELECT", "accounts", "sqlite"] {
         assert!(!body.contains(leak), "la respuesta filtra {leak}: {body}");
     }
+}
+
+/// The sender is told when a message reaches the recipient's device and when
+/// it is read.
+#[tokio::test]
+async fn receipts_reach_the_sender() {
+    let (base, pool) = spawn_server().await;
+    let client = reqwest::Client::new();
+    let alice = register(&client, &base, &pool, "alice", "Alicia").await;
+    let bob = register(&client, &base, &pool, "bob", "Roberto").await;
+    befriend(&client, &base, &alice, &bob).await;
+
+    // Alice opens her stream so receipts can reach her, then sends.
+    let res = client
+        .get(format!("{base}/v1/messages/stream"))
+        .bearer_auth(&alice)
+        .send()
+        .await
+        .unwrap();
+    let mut alice_stream = res.bytes_stream();
+
+    let sent: Value = client
+        .put(format!("{base}/v1/messages/bob"))
+        .bearer_auth(&alice)
+        .json(&json!({ "body": "CIPHERTEXT" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = sent["id"].as_str().unwrap().to_string();
+
+    // Bob acknowledges it: Alice learns it was delivered.
+    client
+        .delete(format!("{base}/v1/messages/{id}"))
+        .bearer_auth(&bob)
+        .send()
+        .await
+        .unwrap();
+    let receipt = next_sse_event(&mut alice_stream, "receipt").await;
+    assert_eq!(receipt["id"], id.as_str());
+    assert_eq!(receipt["state"], "delivered");
+
+    // Bob reads it: Alice learns that too.
+    let res = client
+        .post(format!("{base}/v1/messages/{id}/read"))
+        .bearer_auth(&bob)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 204);
+    let receipt = next_sse_event(&mut alice_stream, "receipt").await;
+    assert_eq!(receipt["state"], "read");
+
+    // Somebody else cannot claim to have read Alice's message.
+    let res = client
+        .post(format!("{base}/v1/messages/{id}/read"))
+        .bearer_auth(&alice)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 204, "silently ignored, never an error");
 }
 
 /// A forgotten password can be reset by email, without the endpoint becoming

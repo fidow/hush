@@ -82,6 +82,10 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "status.offline": "Desconectado",
     "status.lastSeen": "últ. vez {when}",
 
+    "receipt.sent": "Enviado",
+    "receipt.delivered": "Recibido",
+    "receipt.read": "Leído",
+
     "settings.title": "Ajustes",
     "settings.alias": "Nombre visible",
     "settings.status": "Estado",
@@ -244,6 +248,10 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "status.busy": "Busy",
     "status.offline": "Offline",
     "status.lastSeen": "last seen {when}",
+
+    "receipt.sent": "Sent",
+    "receipt.delivered": "Delivered",
+    "receipt.read": "Read",
 
     "settings.title": "Settings",
     "settings.alias": "Display name",

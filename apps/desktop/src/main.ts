@@ -17,6 +17,8 @@ interface Message {
   sender: string;
   kind: string; // "text" | "image" (imagen = data URL en `text`)
   text: string;
+  /// Para los mensajes propios: "sent", "delivered" o "read".
+  state: string;
   created_at: number;
   mine: boolean;
 }
@@ -27,6 +29,7 @@ interface StoredMessage {
   mine: boolean;
   kind: string;
   text: string;
+  state: string;
   created_at: number;
 }
 
@@ -294,6 +297,7 @@ async function selectContact(name: string) {
         sender: m.mine ? me : m.contact,
         kind: m.kind,
         text: m.text,
+        state: m.state,
         created_at: m.created_at,
         mine: m.mine,
       }));
@@ -307,6 +311,8 @@ async function selectContact(name: string) {
     }
   }
   renderMessages();
+  // Opening the conversation is what "read" means.
+  void invoke("mark_read", { contact: name }).catch(() => {});
   $("#send-input").focus();
 }
 
@@ -326,6 +332,14 @@ function renderMessages() {
       div.appendChild(img);
     } else {
       div.textContent = msg.text;
+    }
+    if (msg.mine) {
+      // Delivery ticks: one for sent, two for delivered, blue two for read.
+      const ticks = document.createElement("span");
+      ticks.className = `ticks ticks-${msg.state}`;
+      ticks.textContent = msg.state === "sent" ? "✓" : "✓✓";
+      ticks.title = t(`receipt.${msg.state}`);
+      div.appendChild(ticks);
     }
     div.title = new Date(msg.created_at).toLocaleTimeString();
     container.appendChild(div);
@@ -853,6 +867,7 @@ $("#send-form").addEventListener("submit", async (e) => {
       sender: me,
       kind: stored.kind,
       text: stored.text,
+      state: stored.state,
       created_at: stored.created_at,
       mine: true,
     });
@@ -865,7 +880,11 @@ $("#send-form").addEventListener("submit", async (e) => {
 listen<{ id: string; sender: string; kind: string; text: string; created_at: number }>(
   "hush://message",
   ({ payload }) => {
-    addMessage(payload.sender, { ...payload, mine: false });
+    addMessage(payload.sender, { ...payload, state: "delivered", mine: false });
+    // Reading it right away if that chat is open on screen.
+    if (document.hasFocus() && current === payload.sender) {
+      void invoke("mark_read", { contact: payload.sender }).catch(() => {});
+    }
     // Don't interrupt someone already reading that very conversation.
     const watching = document.hasFocus() && current === payload.sender;
     if (!watching) {
@@ -876,6 +895,17 @@ listen<{ id: string; sender: string; kind: string; text: string; created_at: num
     }
   },
 );
+
+listen<{ id: string; state: string }>("hush://receipt", ({ payload }) => {
+  for (const contact of contacts.values()) {
+    const msg = contact.messages.find((m) => m.id === payload.id);
+    if (msg) {
+      msg.state = payload.state;
+      renderMessages();
+      break;
+    }
+  }
+});
 
 listen("hush://contacts", async () => {
   const before = new Set(
@@ -940,6 +970,7 @@ $("#img-send").addEventListener("click", async () => {
       sender: me,
       kind: stored.kind,
       text: stored.text,
+      state: stored.state,
       created_at: stored.created_at,
       mine: true,
     });

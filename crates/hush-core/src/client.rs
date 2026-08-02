@@ -20,6 +20,8 @@ pub enum ClientEvent {
     Message(DecryptedMessage),
     /// The contact list changed (a request arrived, was accepted, …).
     ContactsChanged,
+    /// One of our messages was delivered or read.
+    Receipt { id: String, state: String },
 }
 
 /// A decrypted incoming message, ready for display.
@@ -133,6 +135,11 @@ enum Command {
     History {
         contact: String,
         reply: oneshot::Sender<Result<Vec<StoredMessage>, String>>,
+    },
+    /// Reports every unread message from `contact` as read.
+    MarkRead {
+        contact: String,
+        reply: oneshot::Sender<Result<(), String>>,
     },
     UpdateMe {
         alias: Option<String>,
@@ -355,6 +362,13 @@ impl HushClient {
     pub async fn history(&self, contact: &str) -> Result<Vec<StoredMessage>, String> {
         let contact = contact.to_string();
         self.request(|reply| Command::History { contact, reply })
+            .await
+    }
+
+    /// Reports every unread message from `contact` as read.
+    pub async fn mark_read(&self, contact: &str) -> Result<(), String> {
+        let contact = contact.to_string();
+        self.request(|reply| Command::MarkRead { contact, reply })
             .await
     }
 
@@ -660,11 +674,27 @@ impl Actor {
             mine: true,
             kind: kind.to_string(),
             text: content.to_string(),
+            // It reached the server; the recipient's device confirms later.
+            state: "sent".to_string(),
             created_at: now_ms(),
         };
         self.db.add_message(&stored)?;
         self.db.upsert_contact(recipient, &remote.alias, "accepted")?;
         Ok(stored)
+    }
+
+    /// Reports the unread messages from `contact` as read, both locally and
+    /// to the sender.
+    async fn handle_mark_read(&self, contact: &str) -> Result<(), String> {
+        let session = self.session.as_ref().ok_or("no_session")?;
+        let unread = self.db.unread_from(contact).map_err(|e| e.to_string())?;
+        for id in unread {
+            // A failed receipt is not worth failing the read for; the message
+            // is marked locally either way so we don't retry forever.
+            let _ = session.api.mark_read(&id).await;
+            let _ = self.db.set_message_state(&id, "read");
+        }
+        Ok(())
     }
 
     /// Pulls the contact list from the server into the local cache. Failures
@@ -716,6 +746,9 @@ impl Actor {
                     contact: msg.sender.clone(),
                     mine: false,
                     kind,
+                    // Incoming messages become "read" when the user opens the
+                    // conversation; until then this tracks what we owe.
+                    state: "delivered".to_string(),
                     text,
                     created_at: msg.created_at,
                 };
@@ -900,6 +933,9 @@ async fn actor(db_path: PathBuf, mut commands: mpsc::Receiver<Command>) {
                 Some(Command::History { contact, reply }) => {
                     let _ = reply.send(actor.db.history(&contact).map_err(|e| e.to_string()));
                 }
+                Some(Command::MarkRead { contact, reply }) => {
+                    let _ = reply.send(actor.handle_mark_read(&contact).await);
+                }
                 Some(Command::UpdateMe { alias, status, reply }) => {
                     let result = match actor.session.as_ref() {
                         None => Err("no_session".to_string()),
@@ -933,6 +969,12 @@ async fn actor(db_path: PathBuf, mut commands: mpsc::Receiver<Command>) {
                         actor.sync_contacts().await;
                         if let Some(events) = &actor.events {
                             let _ = events.send(ClientEvent::ContactsChanged).await;
+                        }
+                    }
+                    Some(ServerEvent::Receipt { id, state }) => {
+                        let _ = actor.db.set_message_state(&id, &state);
+                        if let Some(events) = &actor.events {
+                            let _ = events.send(ClientEvent::Receipt { id, state }).await;
                         }
                     }
                     None => {

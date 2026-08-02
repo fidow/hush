@@ -33,7 +33,14 @@ pub struct ArchiveEntry {
     pub mine: bool,
     pub kind: String,
     pub text: String,
+    #[serde(default = "default_state")]
+    pub state: String,
     pub created_at: i64,
+}
+
+/// Entries archived before delivery states existed.
+fn default_state() -> String {
+    "sent".to_string()
 }
 
 impl From<&StoredMessage> for ArchiveEntry {
@@ -44,6 +51,7 @@ impl From<&StoredMessage> for ArchiveEntry {
             mine: m.mine,
             kind: m.kind.clone(),
             text: m.text.clone(),
+            state: m.state.clone(),
             created_at: m.created_at,
         }
     }
@@ -57,6 +65,7 @@ impl From<ArchiveEntry> for StoredMessage {
             mine: e.mine,
             kind: e.kind,
             text: e.text,
+            state: e.state,
             created_at: e.created_at,
         }
     }
@@ -159,6 +168,7 @@ mod tests {
             mine: true,
             kind: "text".into(),
             text: "hola bob".into(),
+            state: "sent".into(),
             created_at: 1234,
         }
     }
