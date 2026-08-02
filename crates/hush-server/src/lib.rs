@@ -188,6 +188,7 @@ pub fn app(db: SqlitePool) -> Router {
         next_listener_id: Arc::new(AtomicU64::new(0)),
     };
     Router::new()
+        .route("/", get(landing))
         .route("/v1/accounts", post(register))
         .route("/v1/accounts/verify", post(verify_account))
         .route("/v1/sessions", post(login))
@@ -321,6 +322,25 @@ fn now() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as i64
+}
+
+/// Download page. Embedded at compile time so the binary stays
+/// self-contained: no asset directory to ship or keep in sync.
+///
+/// Deliberately not a web client — serving the code that performs the
+/// encryption from the same server that relays the messages would mean
+/// trusting it on every page load, which is exactly what the app avoids.
+async fn landing(parts: axum::http::HeaderMap) -> axum::response::Html<String> {
+    let spanish = parts
+        .get("accept-language")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|langs| langs.to_lowercase().starts_with("es"));
+    let page = if spanish {
+        include_str!("../web/index.es.html")
+    } else {
+        include_str!("../web/index.en.html")
+    };
+    axum::response::Html(page.replace("{{VERSION}}", env!("CARGO_PKG_VERSION")))
 }
 
 /// Authenticated user, resolved from the `Authorization: Bearer <token>` header.
