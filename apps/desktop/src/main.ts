@@ -247,6 +247,7 @@ async function refreshContacts() {
     if (current && !contacts.has(current)) closeConversation();
     renderContactList();
     if (current) updateHeader();
+    updateConversationPane();
   } catch (err) {
     // Offline: keep showing whatever the cache holds instead of emptying it.
     if (String(err) !== "connection_failed") toast(tError(err));
@@ -255,11 +256,24 @@ async function refreshContacts() {
 
 function closeConversation() {
   current = null;
-  $("#conv-header").textContent = t("chat.pickContact");
-  ($("#send-input") as HTMLInputElement).disabled = true;
-  ($("#send-btn") as HTMLButtonElement).disabled = true;
-  ($("#emoji-btn") as HTMLButtonElement).disabled = true;
   $("#messages").replaceChildren();
+  updateConversationPane();
+}
+
+/// Swaps the composer for an explanation while no conversation is open, and
+/// tailors it to whether there is anyone to talk to yet.
+function updateConversationPane() {
+  const pane = document.querySelector(".conversation")!;
+  pane.classList.toggle("no-chat", current === null);
+  if (current !== null) return;
+
+  const hasContacts = [...contacts.values()].some((c) => c.state === "accepted");
+  $("#conv-empty-title").textContent = t(
+    hasContacts ? "empty.pickTitle" : "empty.noContactsTitle",
+  );
+  $("#conv-empty-note").textContent = t(
+    hasContacts ? "empty.pickNote" : "empty.noContactsNote",
+  );
 }
 
 /// "hace 5 minutos" / "5 minutes ago", in the active language.
@@ -311,6 +325,7 @@ async function selectContact(name: string) {
     if (target) li.classList.remove("unread");
   });
   updateHeader();
+  updateConversationPane();
   ($("#send-input") as HTMLInputElement).disabled = false;
   ($("#send-btn") as HTMLButtonElement).disabled = false;
   ($("#emoji-btn") as HTMLButtonElement).disabled = false;
@@ -529,11 +544,14 @@ async function enterChat(profile: ProfileInfo) {
 
 async function boot() {
   applyTheme(currentTheme());
+  applyFontSize(currentFontSize());
   populateServers();
   populateLanguages();
   populateThemes();
+  populateFontSizes();
   populateStatuses();
   applyTranslations();
+  updateConversationPane();
   try {
     const profile = await invoke<ProfileInfo | null>("load_profile");
     if (profile) {
@@ -602,6 +620,45 @@ $("#settings-theme").addEventListener("change", (e) =>
   applyTheme((e.target as HTMLSelectElement).value as Theme),
 );
 
+// ---- Tamaño de letra ----
+//
+// Everything is sized in rem, so scaling the root font size scales the whole
+// interface consistently rather than just the message text.
+
+const FONT_KEY = "hush-font-size";
+const FONT_SIZES: { key: string; px: number }[] = [
+  { key: "font.small", px: 13 },
+  { key: "font.normal", px: 15 },
+  { key: "font.large", px: 17 },
+  { key: "font.huge", px: 19 },
+];
+
+function currentFontSize(): number {
+  const stored = Number(localStorage.getItem(FONT_KEY));
+  return FONT_SIZES.some((f) => f.px === stored) ? stored : 15;
+}
+
+function applyFontSize(px: number) {
+  localStorage.setItem(FONT_KEY, String(px));
+  document.documentElement.style.fontSize = `${px}px`;
+}
+
+function populateFontSizes() {
+  const select = $("#settings-font") as HTMLSelectElement;
+  select.replaceChildren();
+  for (const size of FONT_SIZES) {
+    const option = document.createElement("option");
+    option.value = String(size.px);
+    option.textContent = t(size.key);
+    select.appendChild(option);
+  }
+  select.value = String(currentFontSize());
+}
+
+$("#settings-font").addEventListener("change", (e) =>
+  applyFontSize(Number((e.target as HTMLSelectElement).value)),
+);
+
 function populateLanguages() {
   for (const id of ["#lang-input", "#settings-lang"]) {
     const select = $(id) as HTMLSelectElement;
@@ -633,6 +690,8 @@ function refreshLanguage(next: Lang) {
   applyTranslations();
   populateStatuses();
   populateThemes();
+  populateFontSizes();
+  updateConversationPane();
   ($("#settings-status") as HTMLSelectElement).value = myStatus;
   for (const id of ["#lang-input", "#settings-lang"]) {
     ($(id) as HTMLSelectElement).value = next;

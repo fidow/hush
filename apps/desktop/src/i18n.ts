@@ -93,6 +93,19 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "settings.save": "Guardar",
     "settings.close": "Cerrar",
     "settings.saved": "Ajustes guardados",
+    "empty.pickTitle": "Ninguna conversación abierta",
+    "empty.pickNote":
+      "Elige un contacto de la lista para leer y escribir. Todo lo que envíes va cifrado de extremo a extremo.",
+    "empty.noContactsTitle": "Todavía no tienes contactos",
+    "empty.noContactsNote":
+      "Escribe un nombre de usuario arriba a la izquierda para enviarle una solicitud. Podréis hablar cuando la acepte.",
+
+    "settings.fontSize": "Tamaño de letra",
+    "font.small": "Pequeña",
+    "font.normal": "Normal",
+    "font.large": "Grande",
+    "font.huge": "Muy grande",
+
     "settings.theme": "Apariencia",
     "theme.system": "Como el sistema",
     "theme.dark": "Oscura",
@@ -271,6 +284,19 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "settings.save": "Save",
     "settings.close": "Close",
     "settings.saved": "Settings saved",
+    "empty.pickTitle": "No conversation open",
+    "empty.pickNote":
+      "Pick a contact from the list to read and write. Everything you send is end-to-end encrypted.",
+    "empty.noContactsTitle": "No contacts yet",
+    "empty.noContactsNote":
+      "Type a username in the box on the left to send a request. You can talk once they accept.",
+
+    "settings.fontSize": "Text size",
+    "font.small": "Small",
+    "font.normal": "Normal",
+    "font.large": "Large",
+    "font.huge": "Extra large",
+
     "settings.theme": "Appearance",
     "theme.system": "Match system",
     "theme.dark": "Dark",

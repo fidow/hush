@@ -142,9 +142,17 @@
         </form>
         <ul id="contact-list"></ul>
       </aside>
-      <main class="conversation">
+      <main class="conversation no-chat">
         <div id="conn-banner" class="conn-banner hidden" data-i18n="conn.offline"></div>
         <header id="conv-header" data-i18n="chat.pickContact"></header>
+
+        <!-- Visible only while no conversation is open. -->
+        <div id="conv-empty" class="conv-empty">
+          <div class="conv-empty-icon">🔒</div>
+          <p id="conv-empty-title" class="conv-empty-title"></p>
+          <p id="conv-empty-note" class="conv-empty-note"></p>
+        </div>
+
         <div id="messages"></div>
         <div id="emoji-panel" class="hidden">
           <div id="emoji-tabs"></div>
@@ -180,6 +188,10 @@
         <label>
           <span data-i18n="settings.theme"></span>
           <select id="settings-theme"></select>
+        </label>
+        <label>
+          <span data-i18n="settings.fontSize"></span>
+          <select id="settings-font"></select>
         </label>
         <label class="toggle">
           <input type="checkbox" id="settings-notifications" />

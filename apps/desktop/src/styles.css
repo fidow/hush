@@ -436,6 +436,43 @@ button.mini {
   border-bottom: 1px solid var(--border);
 }
 
+/* With no conversation open the composer would invite writing into nowhere,
+   so it and the message list give way to an explanation. */
+.conversation.no-chat > #conv-header,
+.conversation.no-chat > #messages,
+.conversation.no-chat > #send-form,
+.conversation:not(.no-chat) > #conv-empty {
+  display: none;
+}
+
+.conv-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6rem;
+  padding: 2rem;
+  text-align: center;
+}
+
+.conv-empty-icon {
+  font-size: 2.6rem;
+  opacity: 0.35;
+}
+
+.conv-empty-title {
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+.conv-empty-note {
+  color: var(--muted);
+  font-size: 0.88rem;
+  max-width: 24rem;
+  line-height: 1.45;
+}
+
 #messages {
   flex: 1;
   overflow-y: auto;
