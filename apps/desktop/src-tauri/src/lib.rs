@@ -58,6 +58,7 @@ async fn connect(app: tauri::AppHandle, client: State<'_, HushClient>) -> Result
                 serde_json::json!({
                     "id": msg.id,
                     "sender": msg.sender,
+                    "kind": msg.kind,
                     "text": msg.text,
                     "created_at": msg.created_at,
                 }),
@@ -76,6 +77,16 @@ async fn send_message(
     text: String,
 ) -> Result<StoredMessage, String> {
     client.send_text(&recipient, &text).await
+}
+
+/// Encrypts and sends a pasted image (data URL); returns the stored message.
+#[tauri::command]
+async fn send_image(
+    client: State<'_, HushClient>,
+    recipient: String,
+    dataUrl: String,
+) -> Result<StoredMessage, String> {
+    client.send_image(&recipient, &dataUrl).await
 }
 
 /// Validates the user exists, stores it as a contact, returns its alias.
@@ -119,6 +130,7 @@ pub fn run() {
             login,
             connect,
             send_message,
+            send_image,
             add_contact,
             get_contacts,
             get_history

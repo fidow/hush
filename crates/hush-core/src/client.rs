@@ -18,8 +18,27 @@ use crate::{ApiClient, Engine, IncomingMessage};
 pub struct DecryptedMessage {
     pub id: String,
     pub sender: String,
+    /// "text" or "image" (image content is a data URL).
+    pub kind: String,
     pub text: String,
     pub created_at: i64,
+}
+
+/// Wire format inside the encrypted envelope. Plain (non-JSON) payloads from
+/// older clients are treated as text.
+fn encode_content(kind: &str, content: &str) -> Vec<u8> {
+    serde_json::json!({ "kind": kind, "content": content })
+        .to_string()
+        .into_bytes()
+}
+
+fn decode_content(plain: &[u8]) -> (String, String) {
+    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(plain) {
+        if let (Some(kind), Some(content)) = (v["kind"].as_str(), v["content"].as_str()) {
+            return (kind.to_string(), content.to_string());
+        }
+    }
+    ("text".to_string(), String::from_utf8_lossy(plain).into_owned())
 }
 
 /// The locally stored account, as reported to the UI.
@@ -57,7 +76,8 @@ enum Command {
     },
     Send {
         recipient: String,
-        text: String,
+        kind: String,
+        content: String,
         reply: oneshot::Sender<Result<StoredMessage, String>>,
     },
     AddContact {
@@ -177,10 +197,29 @@ impl HushClient {
     /// Encrypts and sends `text`, establishing or renegotiating the session
     /// as needed. Returns the stored message for display.
     pub async fn send_text(&self, recipient: &str, text: &str) -> Result<StoredMessage, String> {
-        let (recipient, text) = (recipient.to_string(), text.to_string());
+        self.send_content(recipient, "text", text).await
+    }
+
+    /// Encrypts and sends an image given as a data URL.
+    pub async fn send_image(&self, recipient: &str, data_url: &str) -> Result<StoredMessage, String> {
+        if !data_url.starts_with("data:image/") {
+            return Err("El contenido pegado no es una imagen".to_string());
+        }
+        self.send_content(recipient, "image", data_url).await
+    }
+
+    async fn send_content(
+        &self,
+        recipient: &str,
+        kind: &str,
+        content: &str,
+    ) -> Result<StoredMessage, String> {
+        let (recipient, kind, content) =
+            (recipient.to_string(), kind.to_string(), content.to_string());
         self.request(|reply| Command::Send {
             recipient,
-            text,
+            kind,
+            content,
             reply,
         })
         .await
@@ -347,7 +386,12 @@ impl Actor {
         Ok(session.api.stream().await?)
     }
 
-    async fn handle_send(&mut self, recipient: &str, text: &str) -> anyhow::Result<StoredMessage> {
+    async fn handle_send(
+        &mut self,
+        recipient: &str,
+        kind: &str,
+        content: &str,
+    ) -> anyhow::Result<StoredMessage> {
         let session = self
             .session
             .as_mut()
@@ -367,13 +411,17 @@ impl Actor {
             session.engine.ensure_session(recipient, &bundle).await?;
         }
 
-        let envelope = session.engine.encrypt(recipient, text.as_bytes()).await?;
+        let envelope = session
+            .engine
+            .encrypt(recipient, &encode_content(kind, content))
+            .await?;
         let id = session.api.send_message(recipient, &envelope).await?;
         let stored = StoredMessage {
             id,
             contact: recipient.to_string(),
             mine: true,
-            text: text.to_string(),
+            kind: kind.to_string(),
+            text: content.to_string(),
             created_at: now_ms(),
         };
         self.db.add_message(&stored)?;
@@ -388,11 +436,12 @@ impl Actor {
         match session.engine.decrypt(&msg.sender, &msg.body).await {
             Ok(plain) => {
                 let _ = session.api.ack_message(&msg.id).await;
-                let text = String::from_utf8_lossy(&plain).into_owned();
+                let (kind, text) = decode_content(&plain);
                 let stored = StoredMessage {
                     id: msg.id,
                     contact: msg.sender.clone(),
                     mine: false,
+                    kind,
                     text,
                     created_at: msg.created_at,
                 };
@@ -419,6 +468,7 @@ impl Actor {
                         .send(DecryptedMessage {
                             id: stored.id,
                             sender: stored.contact,
+                            kind: stored.kind,
                             text: stored.text,
                             created_at: stored.created_at,
                         })
@@ -492,8 +542,10 @@ async fn actor(db_path: PathBuf, mut commands: mpsc::Receiver<Command>) {
                         }
                     }
                 }
-                Some(Command::Send { recipient, text, reply }) => {
-                    let result = actor.handle_send(&recipient.to_lowercase(), &text).await;
+                Some(Command::Send { recipient, kind, content, reply }) => {
+                    let result = actor
+                        .handle_send(&recipient.to_lowercase(), &kind, &content)
+                        .await;
                     let _ = reply.send(result.map_err(|e| e.to_string()));
                 }
                 Some(Command::AddContact { username, reply }) => {

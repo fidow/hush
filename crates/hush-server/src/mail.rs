@@ -30,7 +30,16 @@ impl MailConfig {
                 .ok()
                 .and_then(|p| p.parse().ok())
                 .unwrap_or(25),
-            from: std::env::var("HUSH_SMTP_FROM").unwrap_or_else(|_| "hush@localhost".into()),
+            from: {
+                let from =
+                    std::env::var("HUSH_SMTP_FROM").unwrap_or_else(|_| "hush@localhost".into());
+                // Bare addresses get the app's display name: `Hush <addr>`.
+                if from.contains('<') {
+                    from
+                } else {
+                    format!("Hush <{from}>")
+                }
+            },
             user: std::env::var("HUSH_SMTP_USER").ok(),
             pass: std::env::var("HUSH_SMTP_PASS").ok(),
             starttls: std::env::var("HUSH_SMTP_STARTTLS").is_ok_and(|v| v == "1"),

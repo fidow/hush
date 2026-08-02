@@ -6,6 +6,7 @@ import { CATEGORIES, MAX_RECENT, RECENT_KEY } from "./emoji";
 interface Message {
   id: string;
   sender: string;
+  kind: string; // "text" | "image" (imagen = data URL en `text`)
   text: string;
   created_at: number;
   mine: boolean;
@@ -15,6 +16,7 @@ interface StoredMessage {
   id: string;
   contact: string;
   mine: boolean;
+  kind: string;
   text: string;
   created_at: number;
 }
@@ -114,6 +116,7 @@ async function selectContact(name: string) {
       const restored: Message[] = hist.map((m) => ({
         id: m.id,
         sender: m.mine ? me : m.contact,
+        kind: m.kind,
         text: m.text,
         created_at: m.created_at,
         mine: m.mine,
@@ -138,7 +141,15 @@ function renderMessages() {
   for (const msg of contacts.get(current)?.messages ?? []) {
     const div = document.createElement("div");
     div.className = `bubble ${msg.mine ? "mine" : "theirs"}`;
-    div.textContent = msg.text;
+    if (msg.kind === "image") {
+      const img = document.createElement("img");
+      img.src = msg.text;
+      img.alt = "Imagen";
+      div.classList.add("image");
+      div.appendChild(img);
+    } else {
+      div.textContent = msg.text;
+    }
     div.title = new Date(msg.created_at).toLocaleTimeString();
     container.appendChild(div);
   }
@@ -299,6 +310,7 @@ $("#send-form").addEventListener("submit", async (e) => {
     addMessage(recipient, {
       id: stored.id,
       sender: me,
+      kind: stored.kind,
       text: stored.text,
       created_at: stored.created_at,
       mine: true,
@@ -309,12 +321,70 @@ $("#send-form").addEventListener("submit", async (e) => {
   }
 });
 
-listen<{ id: string; sender: string; text: string; created_at: number }>(
+listen<{ id: string; sender: string; kind: string; text: string; created_at: number }>(
   "hush://message",
   ({ payload }) => {
     addMessage(payload.sender, { ...payload, mine: false });
   },
 );
+
+// ---- Pegar imágenes ----
+
+let pendingImage: string | null = null;
+
+document.addEventListener("paste", (e) => {
+  if (!current || $("#chat").classList.contains("hidden")) return;
+  const item = Array.from(e.clipboardData?.items ?? []).find((i) =>
+    i.type.startsWith("image/"),
+  );
+  if (!item) return;
+  e.preventDefault();
+  const file = item.getAsFile();
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    const dataUrl = reader.result as string;
+    if (dataUrl.length > 10 * 1024 * 1024) {
+      toast("La imagen es demasiado grande (máximo ~7 MB)");
+      return;
+    }
+    pendingImage = dataUrl;
+    ($("#img-preview-img") as HTMLImageElement).src = dataUrl;
+    $("#img-preview").classList.remove("hidden");
+  };
+  reader.readAsDataURL(file);
+});
+
+function closeImagePreview() {
+  pendingImage = null;
+  $("#img-preview").classList.add("hidden");
+}
+
+$("#img-cancel").addEventListener("click", closeImagePreview);
+
+$("#img-send").addEventListener("click", async () => {
+  if (!pendingImage || !current) return;
+  const recipient = current;
+  const dataUrl = pendingImage;
+  const btn = $("#img-send") as HTMLButtonElement;
+  btn.disabled = true;
+  try {
+    const stored = await invoke<StoredMessage>("send_image", { recipient, dataUrl });
+    addMessage(recipient, {
+      id: stored.id,
+      sender: me,
+      kind: stored.kind,
+      text: stored.text,
+      created_at: stored.created_at,
+      mine: true,
+    });
+    closeImagePreview();
+  } catch (err) {
+    toast(`Error al enviar la imagen: ${err}`);
+  } finally {
+    btn.disabled = false;
+  }
+});
 
 listen("hush://disconnected", () => toast("Conexión con el servidor perdida"));
 

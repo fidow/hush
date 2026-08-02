@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS messages (
     id         TEXT PRIMARY KEY,
     contact    TEXT NOT NULL,
     mine       INTEGER NOT NULL,
+    kind       TEXT NOT NULL DEFAULT 'text',
     text       TEXT NOT NULL,
     created_at INTEGER NOT NULL
 );
@@ -62,6 +63,8 @@ pub struct StoredMessage {
     pub id: String,
     pub contact: String,
     pub mine: bool,
+    /// "text" or "image" (image content is a data URL).
+    pub kind: String,
     pub text: String,
     pub created_at: i64,
 }
@@ -87,6 +90,11 @@ impl LocalDb {
         }
         let conn = Connection::open(path).context("open local db")?;
         conn.execute_batch(SCHEMA)?;
+        // Migration for local dbs created before message kinds existed.
+        let _ = conn.execute(
+            "ALTER TABLE messages ADD COLUMN kind TEXT NOT NULL DEFAULT 'text'",
+            [],
+        );
         Ok(Self {
             conn: Rc::new(RefCell::new(conn)),
         })
@@ -188,9 +196,9 @@ impl LocalDb {
     pub fn add_message(&self, m: &StoredMessage) -> Result<()> {
         self.with(|c| {
             c.execute(
-                "INSERT OR IGNORE INTO messages (id, contact, mine, text, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![m.id, m.contact, m.mine as i64, m.text, m.created_at],
+                "INSERT OR IGNORE INTO messages (id, contact, mine, kind, text, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![m.id, m.contact, m.mine as i64, m.kind, m.text, m.created_at],
             )
             .map(|_| ())
         })
@@ -199,7 +207,7 @@ impl LocalDb {
     pub fn history(&self, contact: &str) -> Result<Vec<StoredMessage>> {
         self.with(|c| {
             c.prepare(
-                "SELECT id, contact, mine, text, created_at FROM messages
+                "SELECT id, contact, mine, kind, text, created_at FROM messages
                  WHERE contact = ?1 ORDER BY created_at",
             )?
             .query_map([contact], |r| {
@@ -207,8 +215,9 @@ impl LocalDb {
                     id: r.get(0)?,
                     contact: r.get(1)?,
                     mine: r.get::<_, i64>(2)? != 0,
-                    text: r.get(3)?,
-                    created_at: r.get(4)?,
+                    kind: r.get(3)?,
+                    text: r.get(4)?,
+                    created_at: r.get(5)?,
                 })
             })?
             .collect()

@@ -87,6 +87,8 @@ pub fn app(db: SqlitePool) -> Router {
         .route("/v1/keys/{username}", get(fetch_bundle))
         .route("/v1/messages/stream", get(message_stream))
         .route("/v1/messages/{target}", put(send_message).delete(ack_message))
+        // Encrypted envelopes carrying inline images can be several MB.
+        .layer(axum::extract::DefaultBodyLimit::max(15 * 1024 * 1024))
         .with_state(state)
 }
 
