@@ -2,8 +2,25 @@
 //! queues of opaque encrypted blobs; it can never read message contents.
 
 pub mod mail;
+pub mod ratelimit;
 
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::{collections::HashMap, convert::Infallible, sync::Arc};
+
+use crate::ratelimit::RateLimiter;
+
+/// Abuse limits. Windows in milliseconds.
+const MINUTE: i64 = 60 * 1000;
+const QUARTER_HOUR: i64 = 15 * MINUTE;
+const HOUR: i64 = 60 * MINUTE;
+/// Wrong verification codes accepted before the code is burned.
+const MAX_VERIFY_ATTEMPTS: i64 = 5;
+/// Caps that keep one account from filling the server's disk.
+const MAX_QUEUED_MESSAGES: i64 = 10_000;
+const MAX_ARCHIVE_ENTRIES: i64 = 200_000;
+const MAX_PREKEYS_PER_UPLOAD: usize = 200;
+const MAX_FIELD_BYTES: usize = 64 * 1024;
 
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
@@ -34,6 +51,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     verified        INTEGER NOT NULL DEFAULT 0,
     verify_code     TEXT,
     verify_expires  INTEGER,
+    verify_attempts INTEGER NOT NULL DEFAULT 0,
     token           TEXT NOT NULL UNIQUE,
     registration_id INTEGER NOT NULL,
     identity_key    TEXT NOT NULL,
@@ -75,15 +93,30 @@ pub struct OutMessage {
     pub created_at: i64,
 }
 
+/// A live SSE listener. The id lets a stream remove *its own* entry on
+/// disconnect without evicting a newer connection from the same account.
+struct Listener {
+    id: u64,
+    tx: mpsc::Sender<OutMessage>,
+}
+
+type LiveMap = Arc<Mutex<HashMap<String, Listener>>>;
+
 #[derive(Clone)]
 pub struct AppState {
     db: SqlitePool,
-    live: Arc<Mutex<HashMap<String, mpsc::Sender<OutMessage>>>>,
+    live: LiveMap,
+    limits: Arc<RateLimiter>,
+    next_listener_id: Arc<AtomicU64>,
 }
 
 pub async fn connect_db(url: &str) -> anyhow::Result<SqlitePool> {
     let pool = SqlitePoolOptions::new().connect(url).await?;
     sqlx::raw_sql(SCHEMA).execute(&pool).await?;
+    // Migration for databases created before per-account verify throttling.
+    let _ = sqlx::query("ALTER TABLE accounts ADD COLUMN verify_attempts INTEGER NOT NULL DEFAULT 0")
+        .execute(&pool)
+        .await;
     Ok(pool)
 }
 
@@ -91,6 +124,8 @@ pub fn app(db: SqlitePool) -> Router {
     let state = AppState {
         db,
         live: Arc::new(Mutex::new(HashMap::new())),
+        limits: Arc::new(RateLimiter::new()),
+        next_listener_id: Arc::new(AtomicU64::new(0)),
     };
     Router::new()
         .route("/v1/accounts", post(register))
@@ -110,8 +145,65 @@ pub fn app(db: SqlitePool) -> Router {
 
 type ApiError = (StatusCode, String);
 
+/// Logs the real cause and returns an opaque message: database and
+/// serialization errors must never reach a client.
 fn internal(e: impl std::fmt::Display) -> ApiError {
-    (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+    tracing::error!("internal error: {e}");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Error interno del servidor".to_string(),
+    )
+}
+
+fn too_many() -> ApiError {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        "Demasiados intentos, prueba de nuevo más tarde".to_string(),
+    )
+}
+
+/// Comparison whose duration does not depend on where the mismatch is, so a
+/// verification code cannot be recovered byte by byte.
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// Best-effort client address, used to throttle unauthenticated endpoints.
+/// `X-Forwarded-For` is honoured only when `HUSH_TRUST_PROXY=1`, because the
+/// header is trivially spoofable when the server is exposed directly.
+pub struct ClientIp(pub String);
+
+impl FromRequestParts<AppState> for ClientIp {
+    type Rejection = Infallible;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        _state: &AppState,
+    ) -> Result<Self, Infallible> {
+        if std::env::var("HUSH_TRUST_PROXY").is_ok_and(|v| v == "1") {
+            if let Some(forwarded) = parts
+                .headers
+                .get("x-forwarded-for")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.split(',').next())
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+            {
+                return Ok(ClientIp(forwarded.to_string()));
+            }
+        }
+        Ok(ClientIp(
+            parts
+                .extensions
+                .get::<axum::extract::ConnectInfo<SocketAddr>>()
+                .map(|ci| ci.0.ip().to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+        ))
+    }
 }
 
 fn now() -> i64 {
@@ -170,9 +262,22 @@ fn new_token() -> String {
 
 async fn register(
     State(state): State<AppState>,
+    ClientIp(ip): ClientIp,
     Json(req): Json<RegisterRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let bad = |msg: &str| (StatusCode::BAD_REQUEST, msg.to_string());
+    // Throttle by source and by target address: registration both creates
+    // rows and makes the server send mail, so it is an abuse vector twice
+    // over (account spam and using us to bomb someone's inbox).
+    let now_ms = now();
+    if !state.limits.allow(&format!("reg-ip:{ip}"), 5, HOUR, now_ms)
+        || !state
+            .limits
+            .allow(&format!("reg-mail:{}", req.email.to_lowercase()), 3, HOUR, now_ms)
+    {
+        tracing::warn!(%ip, "registro limitado por exceso de intentos");
+        return Err(too_many());
+    }
     // Usernames are case-insensitive: stored and matched in lowercase.
     let username = req.username.to_lowercase();
     if username.is_empty()
@@ -191,6 +296,14 @@ async fn register(
     }
     if req.password.len() < 8 {
         return Err(bad("La contraseña debe tener al menos 8 caracteres"));
+    }
+    // Argon2 hashes any length, but an unbounded password is free CPU for an
+    // attacker; the same cap keeps the other opaque fields sane.
+    if req.password.len() > 1024 {
+        return Err(bad("La contraseña es demasiado larga"));
+    }
+    if req.archive_salt.len() > 256 || req.identity_key.len() > MAX_FIELD_BYTES {
+        return Err(bad("Datos de registro no válidos"));
     }
 
     let mut salt_bytes = [0u8; 16];
@@ -220,8 +333,8 @@ async fn register(
             // Unverified leftover: allow re-registering (fresh code and keys).
             sqlx::query(
                 "UPDATE accounts SET alias=?, email=?, password_hash=?, archive_salt=?,
-                 verify_code=?, verify_expires=?, token=?, registration_id=?, identity_key=?
-                 WHERE username=?",
+                 verify_code=?, verify_expires=?, verify_attempts=0, token=?,
+                 registration_id=?, identity_key=? WHERE username=?",
             )
             .bind(&req.alias)
             .bind(&req.email)
@@ -279,7 +392,10 @@ async fn register(
     }
 
     let mut resp = serde_json::json!({ "status": "pending_verification" });
-    if std::env::var("HUSH_ECHO_CODE").is_ok_and(|v| v == "1") {
+    // Development convenience, refused whenever mail actually works, so the
+    // flag left set by accident cannot hand out codes on a real deployment.
+    if std::env::var("HUSH_ECHO_CODE").is_ok_and(|v| v == "1") && mail::MailConfig::from_env().is_none()
+    {
         resp["dev_code"] = code.into();
     }
     Ok(Json(resp))
@@ -293,11 +409,25 @@ struct VerifyRequest {
 
 async fn verify_account(
     State(state): State<AppState>,
+    ClientIp(ip): ClientIp,
     Json(req): Json<VerifyRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let username = req.username.to_lowercase();
+    // A 6-digit code is only 10^6 possibilities: without throttling plus the
+    // persistent attempt counter below it can be exhausted in minutes.
+    let now_ms = now();
+    if !state
+        .limits
+        .allow(&format!("verify:{username}"), 5, QUARTER_HOUR, now_ms)
+        || !state.limits.allow(&format!("verify-ip:{ip}"), 20, QUARTER_HOUR, now_ms)
+    {
+        tracing::warn!(%username, %ip, "verificación limitada por exceso de intentos");
+        return Err(too_many());
+    }
+
     let row = sqlx::query(
-        "SELECT token, verify_code, verify_expires, verified FROM accounts WHERE username = ?",
+        "SELECT token, verify_code, verify_expires, verified, verify_attempts
+         FROM accounts WHERE username = ?",
     )
     .bind(&username)
     .fetch_optional(&state.db)
@@ -310,17 +440,51 @@ async fn verify_account(
     }
     let stored_code: Option<String> = row.get(1);
     let expires: Option<i64> = row.get(2);
-    let valid = stored_code.as_deref() == Some(req.code.as_str())
-        && expires.is_some_and(|e| e > now());
-    if !valid {
-        return Err((StatusCode::BAD_REQUEST, "Código incorrecto o caducado".into()));
+    let attempts: i64 = row.get(4);
+    let bad_code = || {
+        (
+            StatusCode::BAD_REQUEST,
+            "Código incorrecto o caducado".to_string(),
+        )
+    };
+    if attempts >= MAX_VERIFY_ATTEMPTS {
+        return Err(bad_code());
     }
 
-    sqlx::query("UPDATE accounts SET verified = 1, verify_code = NULL WHERE username = ?")
+    let valid = stored_code
+        .as_deref()
+        .is_some_and(|stored| constant_time_eq(stored, &req.code))
+        && expires.is_some_and(|e| e > now_ms);
+    if !valid {
+        // Burn the code once the budget is spent: the account must be
+        // registered again to get a fresh one.
+        let spent = attempts + 1;
+        let burn = spent >= MAX_VERIFY_ATTEMPTS;
+        sqlx::query(
+            "UPDATE accounts SET verify_attempts = ?,
+             verify_code = CASE WHEN ? THEN NULL ELSE verify_code END
+             WHERE username = ?",
+        )
+        .bind(spent)
+        .bind(burn)
         .bind(&username)
         .execute(&state.db)
         .await
         .map_err(internal)?;
+        if burn {
+            tracing::warn!(%username, "código de verificación anulado tras demasiados fallos");
+        }
+        return Err(bad_code());
+    }
+
+    sqlx::query(
+        "UPDATE accounts SET verified = 1, verify_code = NULL, verify_attempts = 0
+         WHERE username = ?",
+    )
+    .bind(&username)
+    .execute(&state.db)
+    .await
+    .map_err(internal)?;
     tracing::info!(username = %username, "cuenta verificada");
     Ok(Json(serde_json::json!({ "token": row.get::<String, _>(0) })))
 }
@@ -331,11 +495,36 @@ struct LoginRequest {
     password: String,
 }
 
+/// Argon2 hash of an unguessable value, used to equalise the cost of logging
+/// into a non-existent account. Generated once at startup.
+static DUMMY_HASH: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    let mut raw = [0u8; 16];
+    rand::rng().fill_bytes(&mut raw);
+    let salt = SaltString::encode_b64(&raw).expect("valid salt");
+    Argon2::default()
+        .hash_password(b"unused", &salt)
+        .expect("hashing works")
+        .to_string()
+});
+
 async fn login(
     State(state): State<AppState>,
+    ClientIp(ip): ClientIp,
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let username = req.username.to_lowercase();
+    // Throttling here stops password guessing and, just as importantly, stops
+    // an attacker from pinning the CPU: every attempt runs Argon2.
+    let now_ms = now();
+    if !state
+        .limits
+        .allow(&format!("login:{username}"), 10, QUARTER_HOUR, now_ms)
+        || !state.limits.allow(&format!("login-ip:{ip}"), 30, QUARTER_HOUR, now_ms)
+    {
+        tracing::warn!(%username, %ip, "login limitado por exceso de intentos");
+        return Err(too_many());
+    }
+
     let row = sqlx::query(
         "SELECT token, password_hash, verified, archive_salt FROM accounts WHERE username = ?",
     )
@@ -350,7 +539,14 @@ async fn login(
             "Usuario o contraseña incorrectos".to_string(),
         )
     };
-    let row = row.ok_or_else(denied)?;
+    let Some(row) = row else {
+        // Verify against a throwaway hash so a missing account costs the same
+        // time as a wrong password: otherwise the response time enumerates
+        // which usernames exist.
+        let _ = PasswordHash::new(&DUMMY_HASH)
+            .map(|h| Argon2::default().verify_password(req.password.as_bytes(), &h));
+        return Err(denied());
+    };
     let hash_str: String = row.get(1);
     let parsed = PasswordHash::new(&hash_str).map_err(internal)?;
     Argon2::default()
@@ -362,6 +558,7 @@ async fn login(
             "La cuenta no está verificada; revisa tu email".into(),
         ));
     }
+    state.limits.reset(&format!("login:{username}"));
     tracing::info!(username = %username, "login correcto");
     Ok(Json(serde_json::json!({
         "token": row.get::<String, _>(0),
@@ -412,9 +609,20 @@ async fn upload_keys(
     State(state): State<AppState>,
     Json(req): Json<UploadKeysRequest>,
 ) -> Result<StatusCode, ApiError> {
+    if req.one_time_prekeys.len() > MAX_PREKEYS_PER_UPLOAD {
+        return Err((StatusCode::BAD_REQUEST, "Demasiadas prekeys".into()));
+    }
+    let bundle = req.bundle_static.to_string();
+    if bundle.len() > MAX_FIELD_BYTES
+        || req.one_time_prekeys.iter().any(|pk| pk.data.len() > MAX_FIELD_BYTES)
+        || req.identity_key.as_ref().is_some_and(|k| k.len() > MAX_FIELD_BYTES)
+    {
+        return Err((StatusCode::BAD_REQUEST, "Datos de claves no válidos".into()));
+    }
+
     let mut tx = state.db.begin().await.map_err(internal)?;
     sqlx::query("UPDATE accounts SET bundle_static = ? WHERE username = ?")
-        .bind(req.bundle_static.to_string())
+        .bind(&bundle)
         .bind(&auth.username)
         .execute(&mut *tx)
         .await
@@ -522,6 +730,14 @@ async fn send_message(
     Json(req): Json<SendMessageRequest>,
 ) -> Result<Json<SendMessageResponse>, ApiError> {
     let recipient = recipient.to_lowercase();
+    let now_ms = now();
+    if !state
+        .limits
+        .allow(&format!("send:{}", auth.username), 120, MINUTE, now_ms)
+    {
+        return Err(too_many());
+    }
+
     let exists = sqlx::query("SELECT 1 FROM accounts WHERE username = ?")
         .bind(&recipient)
         .fetch_optional(&state.db)
@@ -531,11 +747,27 @@ async fn send_message(
         return Err((StatusCode::NOT_FOUND, "Ese usuario no existe".into()));
     }
 
+    // Cap the undelivered queue so one sender cannot fill the disk (or a
+    // recipient's memory on reconnect) by flooding an offline account.
+    let queued: i64 = sqlx::query("SELECT COUNT(*) FROM messages WHERE recipient = ?")
+        .bind(&recipient)
+        .fetch_one(&state.db)
+        .await
+        .map_err(internal)?
+        .get(0);
+    if queued >= MAX_QUEUED_MESSAGES {
+        tracing::warn!(to = %recipient, "cola de mensajes llena, entrega rechazada");
+        return Err((
+            StatusCode::INSUFFICIENT_STORAGE,
+            "El buzón del destinatario está lleno".into(),
+        ));
+    }
+
     let msg = OutMessage {
         id: uuid::Uuid::new_v4().to_string(),
         sender: auth.username,
         body: req.body,
-        created_at: now(),
+        created_at: now_ms,
     };
     sqlx::query("INSERT INTO messages (id, sender, recipient, body, created_at) VALUES (?, ?, ?, ?, ?)")
         .bind(&msg.id)
@@ -549,8 +781,8 @@ async fn send_message(
 
     tracing::debug!(from = %msg.sender, to = %recipient, id = %msg.id, "mensaje encolado");
     // Best-effort live push; the SSE backlog query covers anyone offline.
-    if let Some(tx) = state.live.lock().await.get(&recipient) {
-        let _ = tx.try_send(msg.clone());
+    if let Some(listener) = state.live.lock().await.get(&recipient) {
+        let _ = listener.tx.try_send(msg.clone());
         tracing::debug!(to = %recipient, id = %msg.id, "entrega en vivo (SSE)");
     }
     Ok(Json(SendMessageResponse { id: msg.id }))
@@ -561,11 +793,21 @@ async fn message_stream(
     State(state): State<AppState>,
 ) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>, ApiError> {
     let (tx, rx) = mpsc::channel::<OutMessage>(256);
-    state
-        .live
-        .lock()
-        .await
-        .insert(auth.username.clone(), tx.clone());
+    let listener_id = state.next_listener_id.fetch_add(1, Ordering::Relaxed);
+    state.live.lock().await.insert(
+        auth.username.clone(),
+        Listener {
+            id: listener_id,
+            tx: tx.clone(),
+        },
+    );
+    // Without this the map grows for every connection ever made and keeps
+    // senders alive for streams that are long gone.
+    let cleanup = LiveGuard {
+        live: state.live.clone(),
+        username: auth.username.clone(),
+        id: listener_id,
+    };
 
     // Backlog first, then live pushes. Clients dedupe by message id: a message
     // arriving during the backlog query can be delivered twice.
@@ -591,12 +833,35 @@ async fn message_stream(
         }
     });
 
-    let stream = ReceiverStream::new(rx).map(|msg| {
+    let stream = ReceiverStream::new(rx).map(move |msg| {
+        // Moving the guard into the closure ties its lifetime to the stream.
+        let _keep = &cleanup;
         Ok(Event::default()
             .event("message")
             .data(serde_json::to_string(&msg).expect("OutMessage serializes")))
     });
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+/// Removes this stream's entry from the live map when the client disconnects,
+/// unless a newer connection for the same account has replaced it.
+struct LiveGuard {
+    live: LiveMap,
+    username: String,
+    id: u64,
+}
+
+impl Drop for LiveGuard {
+    fn drop(&mut self) {
+        let (live, username, id) = (self.live.clone(), self.username.clone(), self.id);
+        tokio::spawn(async move {
+            let mut map = live.lock().await;
+            if map.get(&username).is_some_and(|l| l.id == id) {
+                map.remove(&username);
+                tracing::debug!(user = %username, "stream SSE cerrado");
+            }
+        });
+    }
 }
 
 #[derive(Deserialize)]
@@ -613,6 +878,38 @@ async fn put_archive(
     Path(id): Path<String>,
     Json(req): Json<ArchiveEntryRequest>,
 ) -> Result<StatusCode, ApiError> {
+    if id.len() > 128 {
+        return Err((StatusCode::BAD_REQUEST, "Identificador no válido".into()));
+    }
+    if !state
+        .limits
+        .allow(&format!("archive:{}", auth.username), 600, MINUTE, now())
+    {
+        return Err(too_many());
+    }
+    // Overwrites of an existing entry are always allowed; only growth counts
+    // against the quota.
+    let existing = sqlx::query("SELECT 1 FROM archive WHERE username = ? AND id = ?")
+        .bind(&auth.username)
+        .bind(&id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(internal)?;
+    if existing.is_none() {
+        let count: i64 = sqlx::query("SELECT COUNT(*) FROM archive WHERE username = ?")
+            .bind(&auth.username)
+            .fetch_one(&state.db)
+            .await
+            .map_err(internal)?
+            .get(0);
+        if count >= MAX_ARCHIVE_ENTRIES {
+            return Err((
+                StatusCode::INSUFFICIENT_STORAGE,
+                "Tu archivo de historial está lleno".into(),
+            ));
+        }
+    }
+
     sqlx::query(
         "INSERT INTO archive (username, id, blob, created_at) VALUES (?, ?, ?, ?)
          ON CONFLICT(username, id) DO UPDATE SET blob = excluded.blob",
@@ -651,6 +948,9 @@ async fn ack_message(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    if id.len() > 128 {
+        return Err((StatusCode::BAD_REQUEST, "Identificador no válido".into()));
+    }
     sqlx::query("DELETE FROM messages WHERE id = ? AND recipient = ?")
         .bind(&id)
         .bind(&auth.username)

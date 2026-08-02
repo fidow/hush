@@ -180,6 +180,88 @@ async fn account_lifecycle() {
     assert_eq!(profile["alias"], "Alicia");
 }
 
+/// A 6-digit code must not be guessable: attempts are throttled and the code
+/// is burned before an attacker gets anywhere near 10^6 tries.
+#[tokio::test]
+async fn verification_code_cannot_be_brute_forced() {
+    let (base, pool) = spawn_server().await;
+    let client = reqwest::Client::new();
+
+    client
+        .post(format!("{base}/v1/accounts"))
+        .json(&json!({
+            "username": "victim", "alias": "V", "email": "victim@example.com",
+            "password": "supersecreta", "registration_id": 1, "identity_key": "X"
+        }))
+        .send()
+        .await
+        .unwrap();
+    let real_code = pending_code(&pool, "victim").await;
+
+    for attempt in 0..5 {
+        let res = client
+            .post(format!("{base}/v1/accounts/verify"))
+            .json(&json!({ "username": "victim", "code": "999999" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 400, "intento {attempt} debería fallar");
+    }
+
+    // Even the *correct* code is now refused: the guesser is locked out.
+    let res = client
+        .post(format!("{base}/v1/accounts/verify"))
+        .json(&json!({ "username": "victim", "code": real_code }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 429);
+}
+
+/// Password guessing (and the Argon2 CPU burn that comes with it) is capped.
+#[tokio::test]
+async fn login_attempts_are_throttled() {
+    let (base, pool) = spawn_server().await;
+    let client = reqwest::Client::new();
+    register(&client, &base, &pool, "alice", "Alicia").await;
+
+    for attempt in 0..10 {
+        let res = client
+            .post(format!("{base}/v1/sessions"))
+            .json(&json!({ "username": "alice", "password": "incorrecta" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 401, "intento {attempt} debería ser 401");
+    }
+    let res = client
+        .post(format!("{base}/v1/sessions"))
+        .json(&json!({ "username": "alice", "password": "supersecreta" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 429, "el 11º intento debe estar limitado");
+}
+
+/// Internal failures must not describe the database to the caller.
+#[tokio::test]
+async fn errors_do_not_leak_internals() {
+    let (base, _pool) = spawn_server().await;
+    let client = reqwest::Client::new();
+
+    let res = client
+        .get(format!("{base}/v1/keys/nobody"))
+        .bearer_auth("token-inventado")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 401);
+    let body = res.text().await.unwrap();
+    for leak in ["sqlx", "SELECT", "accounts", "sqlite"] {
+        assert!(!body.contains(leak), "la respuesta filtra {leak}: {body}");
+    }
+}
+
 #[tokio::test]
 async fn full_flow() {
     let (base, pool) = spawn_server().await;

@@ -51,7 +51,28 @@ register a different username in each, add the other user as contact and chat.
 | `HUSH_SMTP_FROM` | `hush@localhost` | From address; a bare address gets the `Hush <…>` display name |
 | `HUSH_SMTP_USER` / `HUSH_SMTP_PASS` | *(unset)* | Optional SMTP credentials |
 | `HUSH_SMTP_STARTTLS` | *(unset)* | Set to `1` to use STARTTLS |
-| `HUSH_ECHO_CODE` | *(unset)* | Set to `1` (dev only!) to echo verification codes in the API response |
+| `HUSH_ECHO_CODE` | *(unset)* | Dev only: echo verification codes in the API response. Ignored whenever SMTP is configured |
+| `HUSH_TRUST_PROXY` | *(unset)* | Set to `1` **only** behind a reverse proxy, so `X-Forwarded-For` is used for per-IP rate limiting |
+
+### Hardening notes
+
+The server throttles registration (per IP and per destination address),
+verification and login (per account and per IP), message sending and archive
+uploads. Verification codes are additionally burned after 5 wrong attempts,
+compared in constant time, and a login for a non-existent account still runs
+Argon2 so response times don't enumerate usernames. Per-account quotas cap the
+undelivered queue and the history archive.
+
+For a public deployment:
+
+- Terminate TLS in front of the server (reverse proxy on `:443`) and keep the
+  binary bound to `127.0.0.1`. Prefer a proxy offering the hybrid
+  `X25519MLKEM768` key exchange so the transport is post-quantum too.
+- Set `HUSH_TRUST_PROXY=1` **only** when a proxy is actually in front:
+  `X-Forwarded-For` is trivially spoofable otherwise, which would let an
+  attacker bypass per-IP limits.
+- Keep `HUSH_LOG=info`. At `debug` the log records who messaged whom and when.
+- Never set `HUSH_ECHO_CODE`.
 
 Accounts require a username, a public alias, an email and a password
 (argon2-hashed). New accounts must be confirmed with a 6-digit code sent by

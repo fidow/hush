@@ -21,6 +21,11 @@ pub struct MailConfig {
     starttls: bool,
 }
 
+/// Whether email delivery is unconfigured (verification codes cannot be sent).
+pub fn config_missing() -> bool {
+    MailConfig::from_env().is_none()
+}
+
 impl MailConfig {
     pub fn from_env() -> Option<Self> {
         let host = std::env::var("HUSH_SMTP_HOST").ok()?;
