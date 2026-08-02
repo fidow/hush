@@ -22,7 +22,8 @@
         <form id="signin-form" class="auth-form">
           <label>
             Servidor
-            <input id="signin-server-input" value="http://127.0.0.1:8080" required />
+            <select id="signin-server-input" required></select>
+            <span id="signin-server-url" class="field-note"></span>
           </label>
           <label>
             Nombre de usuario
@@ -51,7 +52,8 @@
         <form id="login-form" class="auth-form hidden">
           <label>
             Servidor
-            <input id="server-input" value="http://127.0.0.1:8080" required />
+            <select id="server-input" required></select>
+            <span id="server-url" class="field-note"></span>
           </label>
           <label>
             Nombre de usuario

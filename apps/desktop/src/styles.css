@@ -104,7 +104,14 @@ label small {
   font-size: 0.75rem;
 }
 
-input {
+.field-note {
+  font-size: 0.72rem;
+  opacity: 0.6;
+  font-family: ui-monospace, Consolas, monospace;
+}
+
+input,
+select {
   background: var(--panel-2);
   border: 1px solid transparent;
   border-radius: 8px;
@@ -114,8 +121,28 @@ input {
   outline: none;
 }
 
-input:focus {
+input:focus,
+select:focus {
   border-color: var(--accent);
+}
+
+select {
+  cursor: pointer;
+  appearance: none;
+  /* Chevron drawn inline so the control stays self-contained. */
+  background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+    linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position:
+    calc(100% - 18px) calc(50% + 2px),
+    calc(100% - 13px) calc(50% + 2px);
+  background-size: 5px 5px;
+  background-repeat: no-repeat;
+  padding-right: 2rem;
+}
+
+select option {
+  background: var(--panel-2);
+  color: var(--text);
 }
 
 button {

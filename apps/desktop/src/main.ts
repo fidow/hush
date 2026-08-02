@@ -33,6 +33,12 @@ interface Contact {
   loaded: boolean;
 }
 
+/// Servers users can pick from, each with a friendly name. Add new
+/// deployments here and both the sign-in and register forms pick them up.
+const SERVERS: { name: string; url: string }[] = [
+  { name: "Local", url: "http://127.0.0.1:8080" },
+];
+
 const contacts = new Map<string, Contact>();
 let me = "";
 let myAlias = "";
@@ -193,7 +199,27 @@ async function enterChat(profile: ProfileInfo) {
   show("chat");
 }
 
+function populateServers() {
+  for (const [selectId, urlId] of [
+    ["#server-input", "#server-url"],
+    ["#signin-server-input", "#signin-server-url"],
+  ]) {
+    const select = $(selectId) as HTMLSelectElement;
+    select.replaceChildren();
+    for (const server of SERVERS) {
+      const option = document.createElement("option");
+      option.value = server.url;
+      option.textContent = server.name;
+      select.appendChild(option);
+    }
+    const showUrl = () => ($(urlId).textContent = select.value);
+    select.addEventListener("change", showUrl);
+    showUrl();
+  }
+}
+
 async function boot() {
+  populateServers();
   try {
     const profile = await invoke<ProfileInfo | null>("load_profile");
     if (profile) {
@@ -224,7 +250,7 @@ $("#login-form").addEventListener("submit", async (e) => {
   $("#login-error").textContent = "";
   try {
     const devCode = await invoke<string | null>("register", {
-      server: ($("#server-input") as HTMLInputElement).value.trim(),
+      server: ($("#server-input") as HTMLSelectElement).value,
       username: ($("#username-input") as HTMLInputElement).value.trim().toLowerCase(),
       alias: ($("#alias-input") as HTMLInputElement).value.trim(),
       email: ($("#email-input") as HTMLInputElement).value.trim(),
@@ -255,7 +281,7 @@ $("#verify-form").addEventListener("submit", async (e) => {
     await enterChat({
       username: me,
       alias: myAlias,
-      server: ($("#server-input") as HTMLInputElement).value.trim(),
+      server: ($("#server-input") as HTMLSelectElement).value,
     });
   } catch (err) {
     $("#verify-error").textContent = String(err);
@@ -271,7 +297,7 @@ $("#signin-form").addEventListener("submit", async (e) => {
   $("#signin-error").textContent = "";
   try {
     const profile = await invoke<ProfileInfo>("login", {
-      server: ($("#signin-server-input") as HTMLInputElement).value.trim(),
+      server: ($("#signin-server-input") as HTMLSelectElement).value,
       username: ($("#signin-username-input") as HTMLInputElement).value.trim().toLowerCase(),
       password: ($("#signin-password-input") as HTMLInputElement).value,
       historyPassphrase: ($("#signin-history-input") as HTMLInputElement).value,
