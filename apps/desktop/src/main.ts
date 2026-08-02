@@ -37,6 +37,7 @@ interface Contact {
 /// deployments here and both the sign-in and register forms pick them up.
 const SERVERS: { name: string; url: string }[] = [
   { name: "Local", url: "http://127.0.0.1:8080" },
+  { name: "Main Hush", url: "https://hush.villasante.es" },
 ];
 
 const contacts = new Map<string, Contact>();
