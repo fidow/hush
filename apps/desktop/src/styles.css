@@ -245,6 +245,54 @@ button:disabled {
   background: var(--panel-2);
 }
 
+#contact-list li.contact-section {
+  padding: 0.7rem 1rem 0.3rem;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  opacity: 0.5;
+  cursor: default;
+}
+
+#contact-list li.contact-section:hover {
+  background: transparent;
+}
+
+#contact-list li.contact-empty {
+  padding: 1rem;
+  font-size: 0.85rem;
+  cursor: default;
+  opacity: 0.6;
+}
+
+#contact-list li.contact-empty:hover {
+  background: transparent;
+}
+
+#contact-list li.state-incoming,
+#contact-list li.state-outgoing {
+  cursor: default;
+  flex-wrap: wrap;
+}
+
+#contact-list li.state-outgoing {
+  opacity: 0.65;
+}
+
+.contact-actions {
+  display: flex;
+  gap: 0.35rem;
+  width: 100%;
+  padding-left: 1.15rem;
+  margin-top: 0.35rem;
+}
+
+button.mini {
+  font-size: 0.78rem;
+  padding: 0.28rem 0.6rem;
+  border-radius: 6px;
+}
+
 #contact-list li.active {
   background: var(--panel-2);
   color: var(--text);

@@ -39,6 +39,15 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "verify.submit": "Verificar",
 
     "chat.addContact": "añadir contacto…",
+    "contacts.title": "Contactos",
+    "contacts.requests": "Solicitudes",
+    "contacts.accept": "Aceptar",
+    "contacts.reject": "Rechazar",
+    "contacts.pending": "pendiente",
+    "contacts.empty": "Aún no tienes contactos",
+    "contacts.requestSent": "Solicitud enviada",
+    "contacts.nowContacts": "Ya sois contactos",
+    "contacts.remove": "Eliminar contacto",
     "chat.pickContact": "Selecciona un contacto",
     "chat.messagePlaceholder": "Escribe un mensaje cifrado…",
     "chat.send": "Enviar",
@@ -140,6 +149,11 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "err.invalid_recovery_key": "La clave de recuperación no tiene un formato válido",
     "err.no_recovery_key":
       "Este dispositivo aún no tiene la clave de la cuenta. Recupérala aquí abajo con la clave de tu otro dispositivo.",
+    "err.self_contact": "No puedes añadirte a ti mismo",
+    "err.already_contacts": "Ya sois contactos",
+    "err.request_pending": "Ya hay una solicitud pendiente",
+    "err.no_request": "No hay ninguna solicitud que aceptar",
+    "err.not_a_contact": "Solo puedes escribir a contactos aceptados",
   },
   en: {
     "app.tagline": "Private messaging with post-quantum encryption",
@@ -169,6 +183,15 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "verify.submit": "Verify",
 
     "chat.addContact": "add contact…",
+    "contacts.title": "Contacts",
+    "contacts.requests": "Requests",
+    "contacts.accept": "Accept",
+    "contacts.reject": "Decline",
+    "contacts.pending": "pending",
+    "contacts.empty": "No contacts yet",
+    "contacts.requestSent": "Request sent",
+    "contacts.nowContacts": "You are now contacts",
+    "contacts.remove": "Remove contact",
     "chat.pickContact": "Pick a contact",
     "chat.messagePlaceholder": "Write an encrypted message…",
     "chat.send": "Send",
@@ -269,6 +292,11 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "err.invalid_recovery_key": "That recovery key is not in a valid format",
     "err.no_recovery_key":
       "This device doesn't hold the account key yet. Restore it below using the key from your other device.",
+    "err.self_contact": "You cannot add yourself",
+    "err.already_contacts": "You are already contacts",
+    "err.request_pending": "A request is already pending",
+    "err.no_request": "There is no request to accept",
+    "err.not_a_contact": "You can only message accepted contacts",
   },
 };
 

@@ -65,6 +65,20 @@ async fn register(
         .to_string()
 }
 
+/// Links two accounts as accepted contacts, which messaging requires.
+async fn befriend(client: &reqwest::Client, base: &str, from: &str, to: &str) {
+    // The second request from the other side counts as an acceptance.
+    for (requester, target) in [(from, "bob"), (to, "alice")] {
+        let res = client
+            .post(format!("{base}/v1/contacts/{target}"))
+            .bearer_auth(requester)
+            .send()
+            .await
+            .unwrap();
+        assert!(res.status().is_success(), "befriend failed: {}", res.status());
+    }
+}
+
 /// Reads the next `message` SSE event from a byte stream, with a timeout.
 async fn next_sse_message(
     stream: &mut (impl futures_util::Stream<Item = reqwest::Result<bytes::Bytes>> + Unpin),
@@ -262,6 +276,121 @@ async fn errors_do_not_leak_internals() {
     }
 }
 
+/// Contact requests gate messaging: strangers are refused, and a link only
+/// forms once the other side accepts.
+#[tokio::test]
+async fn contact_requests_gate_messaging() {
+    let (base, pool) = spawn_server().await;
+    let client = reqwest::Client::new();
+    let alice = register(&client, &base, &pool, "alice", "Alicia").await;
+    let bob = register(&client, &base, &pool, "bob", "Roberto").await;
+
+    // Without a link, messaging is refused.
+    let res = client
+        .put(format!("{base}/v1/messages/bob"))
+        .bearer_auth(&alice)
+        .json(&json!({ "body": "CIPHERTEXT" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 403);
+
+    // Alice asks; Bob sees an incoming request, Alice an outgoing one.
+    let res = client
+        .post(format!("{base}/v1/contacts/bob"))
+        .bearer_auth(&alice)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    assert_eq!(res.json::<Value>().await.unwrap()["state"], "outgoing");
+
+    let contacts = |token: String| {
+        let client = client.clone();
+        let base = base.clone();
+        async move {
+            client
+                .get(format!("{base}/v1/contacts"))
+                .bearer_auth(token)
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap()["contacts"]
+                .clone()
+        }
+    };
+    assert_eq!(contacts(bob.clone()).await[0]["state"], "incoming");
+    assert_eq!(contacts(alice.clone()).await[0]["state"], "outgoing");
+
+    // Still no messaging while pending, in either direction.
+    let res = client
+        .put(format!("{base}/v1/messages/bob"))
+        .bearer_auth(&alice)
+        .json(&json!({ "body": "CIPHERTEXT" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 403);
+
+    // Asking twice is rejected.
+    let res = client
+        .post(format!("{base}/v1/contacts/bob"))
+        .bearer_auth(&alice)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 409);
+
+    // Bob accepts: both sides become contacts and messaging works.
+    let res = client
+        .post(format!("{base}/v1/contacts/alice/accept"))
+        .bearer_auth(&bob)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    assert_eq!(contacts(alice.clone()).await[0]["state"], "accepted");
+    assert_eq!(contacts(bob.clone()).await[0]["alias"], "Alicia");
+
+    let res = client
+        .put(format!("{base}/v1/messages/bob"))
+        .bearer_auth(&alice)
+        .json(&json!({ "body": "CIPHERTEXT" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+
+    // Removing the contact closes the door again, for both.
+    let res = client
+        .delete(format!("{base}/v1/contacts/alice"))
+        .bearer_auth(&bob)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 204);
+    assert_eq!(contacts(alice.clone()).await.as_array().unwrap().len(), 0);
+    let res = client
+        .put(format!("{base}/v1/messages/bob"))
+        .bearer_auth(&alice)
+        .json(&json!({ "body": "CIPHERTEXT" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 403);
+
+    // You cannot add yourself.
+    let res = client
+        .post(format!("{base}/v1/contacts/alice"))
+        .bearer_auth(&alice)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 400);
+}
+
 #[tokio::test]
 async fn full_flow() {
     let (base, pool) = spawn_server().await;
@@ -269,6 +398,7 @@ async fn full_flow() {
 
     let alice = register(&client, &base, &pool, "alice", "Alicia").await;
     let bob = register(&client, &base, &pool, "bob", "Roberto").await;
+    befriend(&client, &base, &alice, &bob).await;
 
     // Auth required
     let unauth = client.get(format!("{base}/v1/keys/bob")).send().await.unwrap();

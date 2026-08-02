@@ -12,7 +12,15 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::archive::{ArchiveEntry, ArchiveKey};
 use crate::db::{LocalDb, Profile, StoredMessage};
-use crate::{ApiClient, Engine, IncomingMessage};
+use crate::{ApiClient, ContactEntry, Engine, IncomingMessage, ServerEvent};
+
+/// What the UI is told about, over the event channel.
+#[derive(Clone, Debug)]
+pub enum ClientEvent {
+    Message(DecryptedMessage),
+    /// The contact list changed (a request arrived, was accepted, …).
+    ContactsChanged,
+}
 
 /// A decrypted incoming message, ready for display.
 #[derive(Clone, Debug)]
@@ -85,7 +93,7 @@ enum Command {
         reply: oneshot::Sender<Result<usize, String>>,
     },
     Connect {
-        reply: oneshot::Sender<Result<mpsc::Receiver<DecryptedMessage>, String>>,
+        reply: oneshot::Sender<Result<mpsc::Receiver<ClientEvent>, String>>,
     },
     Send {
         recipient: String,
@@ -93,12 +101,22 @@ enum Command {
         content: String,
         reply: oneshot::Sender<Result<StoredMessage, String>>,
     },
-    AddContact {
+    /// Sends a contact request (or accepts one already waiting from them).
+    RequestContact {
         username: String,
         reply: oneshot::Sender<Result<String, String>>,
     },
+    AcceptContact {
+        username: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Rejects a request, cancels ours, or removes an existing contact.
+    RemoveContact {
+        username: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     Contacts {
-        reply: oneshot::Sender<Result<Vec<(String, String)>, String>>,
+        reply: oneshot::Sender<Result<Vec<ContactEntry>, String>>,
     },
     History {
         contact: String,
@@ -108,9 +126,6 @@ enum Command {
         alias: Option<String>,
         status: Option<String>,
         reply: oneshot::Sender<Result<(), String>>,
-    },
-    Presence {
-        reply: oneshot::Sender<Result<Vec<(String, String)>, String>>,
     },
 }
 
@@ -225,7 +240,7 @@ impl HushClient {
 
     /// Opens the message stream for the locally stored account. The returned
     /// channel yields decrypted incoming messages and closes on disconnect.
-    pub async fn connect(&self) -> Result<mpsc::Receiver<DecryptedMessage>, String> {
+    pub async fn connect(&self) -> Result<mpsc::Receiver<ClientEvent>, String> {
         self.request(|reply| Command::Connect { reply }).await
     }
 
@@ -260,14 +275,29 @@ impl HushClient {
         .await
     }
 
-    /// Validates the user exists, stores it as contact, returns its alias.
-    pub async fn add_contact(&self, username: &str) -> Result<String, String> {
+    /// Sends a contact request; returns the resulting state ("outgoing", or
+    /// "accepted" when the other side had already asked).
+    pub async fn request_contact(&self, username: &str) -> Result<String, String> {
         let username = username.to_string();
-        self.request(|reply| Command::AddContact { username, reply })
+        self.request(|reply| Command::RequestContact { username, reply })
             .await
     }
 
-    pub async fn contacts(&self) -> Result<Vec<(String, String)>, String> {
+    pub async fn accept_contact(&self, username: &str) -> Result<(), String> {
+        let username = username.to_string();
+        self.request(|reply| Command::AcceptContact { username, reply })
+            .await
+    }
+
+    /// Rejects a request, cancels one we sent, or removes a contact.
+    pub async fn remove_contact(&self, username: &str) -> Result<(), String> {
+        let username = username.to_string();
+        self.request(|reply| Command::RemoveContact { username, reply })
+            .await
+    }
+
+    /// The contact list, refreshed from the server when reachable.
+    pub async fn contacts(&self) -> Result<Vec<ContactEntry>, String> {
         self.request(|reply| Command::Contacts { reply }).await
     }
 
@@ -291,10 +321,6 @@ impl HushClient {
         .await
     }
 
-    /// Presence of every stored contact, as `username -> status`.
-    pub async fn presence(&self) -> Result<Vec<(String, String)>, String> {
-        self.request(|reply| Command::Presence { reply }).await
-    }
 }
 
 struct Session {
@@ -316,7 +342,7 @@ struct Actor {
     db: LocalDb,
     pending: Option<Pending>,
     session: Option<Session>,
-    events: Option<mpsc::Sender<DecryptedMessage>>,
+    events: Option<mpsc::Sender<ClientEvent>>,
     /// Key protecting the history archive; absent until the user provides
     /// their history passphrase on this device.
     archive_key: Option<ArchiveKey>,
@@ -442,7 +468,7 @@ impl Actor {
                 Ok(entry) => {
                     let msg = StoredMessage::from(entry);
                     // Remember the contact too, so restored chats are listed.
-                    let _ = self.db.upsert_contact(&msg.contact, &msg.contact);
+                    let _ = self.db.upsert_contact(&msg.contact, &msg.contact, "accepted");
                     if self.db.add_message(&msg).is_ok() {
                         restored += 1;
                     }
@@ -521,7 +547,7 @@ impl Actor {
         })
     }
 
-    async fn handle_connect(&mut self) -> anyhow::Result<mpsc::Receiver<IncomingMessage>> {
+    async fn handle_connect(&mut self) -> anyhow::Result<mpsc::Receiver<ServerEvent>> {
         let profile = self
             .db
             .profile()?
@@ -586,8 +612,42 @@ impl Actor {
             created_at: now_ms(),
         };
         self.db.add_message(&stored)?;
-        self.db.upsert_contact(recipient, &remote.alias)?;
+        self.db.upsert_contact(recipient, &remote.alias, "accepted")?;
         Ok(stored)
+    }
+
+    /// Pulls the contact list from the server into the local cache. Failures
+    /// are tolerated: the cache keeps the app usable while offline.
+    async fn sync_contacts(&self) -> Option<Vec<ContactEntry>> {
+        let entries = self.session.as_ref()?.api.list_contacts().await.ok()?;
+        let cached: Vec<(String, String, String)> = entries
+            .iter()
+            .map(|c| (c.username.clone(), c.alias.clone(), c.state.clone()))
+            .collect();
+        if let Err(e) = self.db.replace_contacts(&cached) {
+            tracing::warn!("cannot cache contacts: {e}");
+        }
+        Some(entries)
+    }
+
+    /// The contact list: the server's when reachable, the cache otherwise.
+    async fn contacts(&self) -> Result<Vec<ContactEntry>, String> {
+        if let Some(entries) = self.sync_contacts().await {
+            return Ok(entries);
+        }
+        self.db
+            .contacts()
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|(username, alias, state)| ContactEntry {
+                        username,
+                        alias,
+                        state,
+                        status: "offline".into(),
+                    })
+                    .collect()
+            })
+            .map_err(|e| e.to_string())
     }
 
     /// Returns the stored message so the caller can archive it once the
@@ -614,25 +674,27 @@ impl Actor {
                     .contacts()
                     .unwrap_or_default()
                     .iter()
-                    .any(|(u, _)| u == &msg.sender);
+                    .any(|(u, _, _)| u == &msg.sender);
                 if !known {
+                    // Only accepted contacts can reach us, so the cache is
+                    // simply behind; fill it in.
                     let alias = session
                         .api
                         .fetch_profile(&msg.sender)
                         .await
                         .map(|p| p.alias)
                         .unwrap_or_else(|_| msg.sender.clone());
-                    let _ = self.db.upsert_contact(&msg.sender, &alias);
+                    let _ = self.db.upsert_contact(&msg.sender, &alias, "accepted");
                 }
                 if let Some(events) = &self.events {
                     let _ = events
-                        .send(DecryptedMessage {
+                        .send(ClientEvent::Message(DecryptedMessage {
                             id: stored.id.clone(),
                             sender: stored.contact.clone(),
                             kind: stored.kind.clone(),
                             text: stored.text.clone(),
                             created_at: stored.created_at,
-                        })
+                        }))
                         .await;
                 }
                 Some(stored)
@@ -663,7 +725,7 @@ async fn actor(db_path: PathBuf, mut commands: mpsc::Receiver<Command>) {
         events: None,
         archive_key: None,
     };
-    let mut stream: Option<mpsc::Receiver<IncomingMessage>> = None;
+    let mut stream: Option<mpsc::Receiver<ServerEvent>> = None;
 
     loop {
         tokio::select! {
@@ -729,23 +791,41 @@ async fn actor(db_path: PathBuf, mut commands: mpsc::Receiver<Command>) {
                     }
                     let _ = reply.send(result.map_err(|e| e.to_string()));
                 }
-                Some(Command::AddContact { username, reply }) => {
+                Some(Command::RequestContact { username, reply }) => {
                     let username = username.to_lowercase();
                     let result = match actor.session.as_ref() {
-                        None => Err("no session".to_string()),
-                        Some(s) => match s.api.fetch_profile(&username).await {
-                            Ok(p) => actor
-                                .db
-                                .upsert_contact(&username, &p.alias)
-                                .map(|_| p.alias)
-                                .map_err(|e| e.to_string()),
-                            Err(e) => Err(e.to_string()),
-                        },
+                        None => Err("no_session".to_string()),
+                        Some(s) => s.api.request_contact(&username).await.map_err(|e| e.to_string()),
                     };
+                    if result.is_ok() {
+                        actor.sync_contacts().await;
+                    }
+                    let _ = reply.send(result);
+                }
+                Some(Command::AcceptContact { username, reply }) => {
+                    let username = username.to_lowercase();
+                    let result = match actor.session.as_ref() {
+                        None => Err("no_session".to_string()),
+                        Some(s) => s.api.accept_contact(&username).await.map_err(|e| e.to_string()),
+                    };
+                    if result.is_ok() {
+                        actor.sync_contacts().await;
+                    }
+                    let _ = reply.send(result);
+                }
+                Some(Command::RemoveContact { username, reply }) => {
+                    let username = username.to_lowercase();
+                    let result = match actor.session.as_ref() {
+                        None => Err("no_session".to_string()),
+                        Some(s) => s.api.remove_contact(&username).await.map_err(|e| e.to_string()),
+                    };
+                    if result.is_ok() {
+                        actor.sync_contacts().await;
+                    }
                     let _ = reply.send(result);
                 }
                 Some(Command::Contacts { reply }) => {
-                    let _ = reply.send(actor.db.contacts().map_err(|e| e.to_string()));
+                    let _ = reply.send(actor.contacts().await);
                 }
                 Some(Command::History { contact, reply }) => {
                     let _ = reply.send(actor.db.history(&contact).map_err(|e| e.to_string()));
@@ -771,32 +851,18 @@ async fn actor(db_path: PathBuf, mut commands: mpsc::Receiver<Command>) {
                     }
                     let _ = reply.send(result);
                 }
-                Some(Command::Presence { reply }) => {
-                    let result = match actor.session.as_ref() {
-                        None => Err("no_session".to_string()),
-                        Some(s) => {
-                            let names: Vec<String> = actor
-                                .db
-                                .contacts()
-                                .unwrap_or_default()
-                                .into_iter()
-                                .map(|(u, _)| u)
-                                .collect();
-                            if names.is_empty() {
-                                Ok(Vec::new())
-                            } else {
-                                s.api.presence(&names).await.map_err(|e| e.to_string())
-                            }
-                        }
-                    };
-                    let _ = reply.send(result);
-                }
             },
-            msg = async { stream.as_mut().expect("guarded by if").recv().await }, if stream.is_some() => {
-                match msg {
-                    Some(msg) => {
+            event = async { stream.as_mut().expect("guarded by if").recv().await }, if stream.is_some() => {
+                match event {
+                    Some(ServerEvent::Message(msg)) => {
                         if let Some(stored) = actor.handle_incoming(msg).await {
                             actor.archive_message(&stored).await;
+                        }
+                    }
+                    Some(ServerEvent::ContactsChanged) => {
+                        actor.sync_contacts().await;
+                        if let Some(events) = &actor.events {
+                            let _ = events.send(ClientEvent::ContactsChanged).await;
                         }
                     }
                     None => {

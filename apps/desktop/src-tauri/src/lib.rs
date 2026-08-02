@@ -2,7 +2,7 @@
 //! hush-core engine actor; the webview only ever sees the local user's own
 //! plaintext.
 
-use hush_core::{HushClient, ProfileInfo, StoredMessage};
+use hush_core::{ClientEvent, ContactEntry, HushClient, ProfileInfo, StoredMessage};
 use tauri::{Emitter, Manager, State};
 
 /// The account stored on this device, if any.
@@ -65,17 +65,24 @@ async fn restore_history(client: State<'_, HushClient>, code: String) -> Result<
 async fn connect(app: tauri::AppHandle, client: State<'_, HushClient>) -> Result<(), String> {
     let mut rx = client.connect().await?;
     tauri::async_runtime::spawn(async move {
-        while let Some(msg) = rx.recv().await {
-            let _ = app.emit(
-                "hush://message",
-                serde_json::json!({
-                    "id": msg.id,
-                    "sender": msg.sender,
-                    "kind": msg.kind,
-                    "text": msg.text,
-                    "created_at": msg.created_at,
-                }),
-            );
+        while let Some(event) = rx.recv().await {
+            match event {
+                ClientEvent::Message(msg) => {
+                    let _ = app.emit(
+                        "hush://message",
+                        serde_json::json!({
+                            "id": msg.id,
+                            "sender": msg.sender,
+                            "kind": msg.kind,
+                            "text": msg.text,
+                            "created_at": msg.created_at,
+                        }),
+                    );
+                }
+                ClientEvent::ContactsChanged => {
+                    let _ = app.emit("hush://contacts", ());
+                }
+            }
         }
         let _ = app.emit("hush://disconnected", ());
     });
@@ -102,15 +109,42 @@ async fn send_image(
     client.send_image(&recipient, &dataUrl).await
 }
 
-/// Validates the user exists, stores it as a contact, returns its alias.
+/// Sends a contact request; returns the resulting state.
 #[tauri::command]
-async fn add_contact(client: State<'_, HushClient>, username: String) -> Result<String, String> {
-    client.add_contact(&username).await
+async fn request_contact(
+    client: State<'_, HushClient>,
+    username: String,
+) -> Result<String, String> {
+    client.request_contact(&username).await
 }
 
 #[tauri::command]
-async fn get_contacts(client: State<'_, HushClient>) -> Result<Vec<(String, String)>, String> {
-    client.contacts().await
+async fn accept_contact(client: State<'_, HushClient>, username: String) -> Result<(), String> {
+    client.accept_contact(&username).await
+}
+
+/// Rejects a request, cancels one we sent, or removes a contact.
+#[tauri::command]
+async fn remove_contact(client: State<'_, HushClient>, username: String) -> Result<(), String> {
+    client.remove_contact(&username).await
+}
+
+/// The contact list with state and presence for each entry.
+#[tauri::command]
+async fn get_contacts(client: State<'_, HushClient>) -> Result<Vec<serde_json::Value>, String> {
+    Ok(client
+        .contacts()
+        .await?
+        .into_iter()
+        .map(|c: ContactEntry| {
+            serde_json::json!({
+                "username": c.username,
+                "alias": c.alias,
+                "state": c.state,
+                "status": c.status,
+            })
+        })
+        .collect())
 }
 
 /// Changes the local account's display name and/or presence.
@@ -121,12 +155,6 @@ async fn update_me(
     status: Option<String>,
 ) -> Result<(), String> {
     client.update_me(alias, status).await
-}
-
-/// Presence of every stored contact, as `[username, status]` pairs.
-#[tauri::command]
-async fn get_presence(client: State<'_, HushClient>) -> Result<Vec<(String, String)>, String> {
-    client.presence().await
 }
 
 #[tauri::command]
@@ -160,11 +188,12 @@ pub fn run() {
             connect,
             send_message,
             send_image,
-            add_contact,
+            request_contact,
+            accept_contact,
+            remove_contact,
             get_contacts,
             get_history,
             update_me,
-            get_presence,
             get_recovery_code,
             restore_history
         ])

@@ -17,6 +17,23 @@ pub struct RemoteProfile {
     pub status: String,
 }
 
+/// One entry of the server-side contact list.
+#[derive(Clone, Debug)]
+pub struct ContactEntry {
+    pub username: String,
+    pub alias: String,
+    /// "incoming", "outgoing" or "accepted".
+    pub state: String,
+    pub status: String,
+}
+
+/// Anything the server pushes down the stream.
+#[derive(Clone, Debug)]
+pub enum ServerEvent {
+    Message(IncomingMessage),
+    ContactsChanged,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct IncomingMessage {
     pub id: String,
@@ -264,9 +281,57 @@ impl ApiClient {
         Ok(())
     }
 
+    /// The caller's contact list, including pending requests.
+    pub async fn list_contacts(&self) -> Result<Vec<ContactEntry>> {
+        let req = self.auth(self.http.get(format!("{}/v1/contacts", self.base)))?;
+        let body: Value = Self::check(req.send().await.map_err(Self::conn_err)?)
+            .await?
+            .json()
+            .await?;
+        Ok(body["contacts"]
+            .as_array()
+            .map(|list| {
+                list.iter()
+                    .map(|c| ContactEntry {
+                        username: c["username"].as_str().unwrap_or_default().to_string(),
+                        alias: c["alias"].as_str().unwrap_or_default().to_string(),
+                        state: c["state"].as_str().unwrap_or("accepted").to_string(),
+                        status: c["status"].as_str().unwrap_or("offline").to_string(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    /// Sends a contact request (or accepts, if they already asked).
+    pub async fn request_contact(&self, peer: &str) -> Result<String> {
+        let req = self.auth(self.http.post(format!("{}/v1/contacts/{peer}", self.base)))?;
+        let body: Value = Self::check(req.send().await.map_err(Self::conn_err)?)
+            .await?
+            .json()
+            .await?;
+        Ok(body["state"].as_str().unwrap_or("outgoing").to_string())
+    }
+
+    pub async fn accept_contact(&self, peer: &str) -> Result<()> {
+        let req = self.auth(
+            self.http
+                .post(format!("{}/v1/contacts/{peer}/accept", self.base)),
+        )?;
+        Self::check(req.send().await.map_err(Self::conn_err)?).await?;
+        Ok(())
+    }
+
+    /// Rejects a request, cancels one we sent, or removes a contact.
+    pub async fn remove_contact(&self, peer: &str) -> Result<()> {
+        let req = self.auth(self.http.delete(format!("{}/v1/contacts/{peer}", self.base)))?;
+        Self::check(req.send().await.map_err(Self::conn_err)?).await?;
+        Ok(())
+    }
+
     /// Opens the SSE stream. Returns a channel that yields the offline backlog
-    /// first, then live messages, until the connection drops.
-    pub async fn stream(&self) -> Result<mpsc::Receiver<IncomingMessage>> {
+    /// first, then live events, until the connection drops.
+    pub async fn stream(&self) -> Result<mpsc::Receiver<ServerEvent>> {
         let req = self.auth(
             self.http
                 .get(format!("{}/v1/messages/stream", self.base)),
@@ -279,13 +344,24 @@ impl ApiClient {
             while let Some(Ok(chunk)) = stream.next().await {
                 buf.push_str(&String::from_utf8_lossy(&chunk));
                 while let Some(end) = buf.find("\n\n") {
-                    let event: String = buf[..end].to_string();
+                    let frame: String = buf[..end].to_string();
                     buf.drain(..end + 2);
-                    if let Some(data) = event.lines().find_map(|l| l.strip_prefix("data: ")) {
-                        if let Ok(msg) = serde_json::from_str::<IncomingMessage>(data) {
-                            if tx.send(msg).await.is_err() {
-                                return;
-                            }
+                    let name = frame
+                        .lines()
+                        .find_map(|l| l.strip_prefix("event: "))
+                        .unwrap_or("message");
+                    let data = frame.lines().find_map(|l| l.strip_prefix("data: "));
+                    let event = match (name, data) {
+                        ("contacts", _) => Some(ServerEvent::ContactsChanged),
+                        ("message", Some(data)) => serde_json::from_str::<IncomingMessage>(data)
+                            .ok()
+                            .map(ServerEvent::Message),
+                        // Keep-alive comments and unknown event types.
+                        _ => None,
+                    };
+                    if let Some(event) = event {
+                        if tx.send(event).await.is_err() {
+                            return;
                         }
                     }
                 }

@@ -29,8 +29,16 @@ interface ProfileInfo {
   status: string;
 }
 
+interface ContactEntry {
+  username: string;
+  alias: string;
+  state: "incoming" | "outgoing" | "accepted";
+  status: string;
+}
+
 interface Contact {
   alias: string;
+  state: string;
   status: string;
   messages: Message[];
   loaded: boolean;
@@ -47,6 +55,8 @@ const SETTABLE_STATUSES = ["online", "away", "busy"] as const;
 const PRESENCE_POLL_MS = 20_000;
 
 const contacts = new Map<string, Contact>();
+/// Contacts with messages arrived while their chat was not open.
+const unread = new Set<string>();
 let me = "";
 let myAlias = "";
 let myStatus = "online";
@@ -74,47 +84,137 @@ function contactLabel(name: string): string {
   return alias && alias !== name ? alias : name;
 }
 
-function renderContactItem(name: string) {
-  const li = document.querySelector<HTMLElement>(`#contact-list li[data-name="${name}"]`);
-  if (!li) return;
-  const contact = contacts.get(name);
-  const unread = li.classList.contains("unread");
-  li.replaceChildren();
+/// Rebuilds the sidebar: pending requests first, then accepted contacts.
+function renderContactList() {
+  const list = $("#contact-list");
+  list.replaceChildren();
+
+  const entries = [...contacts.entries()];
+  const order = { incoming: 0, outgoing: 1, accepted: 2 } as Record<string, number>;
+  entries.sort(
+    ([an, a], [bn, b]) =>
+      (order[a.state] ?? 3) - (order[b.state] ?? 3) || an.localeCompare(bn),
+  );
+
+  let lastSection: string | null = null;
+  for (const [name, contact] of entries) {
+    const section = contact.state === "accepted" ? "accepted" : "requests";
+    if (section !== lastSection) {
+      const header = document.createElement("li");
+      header.className = "contact-section";
+      header.textContent =
+        section === "requests" ? t("contacts.requests") : t("contacts.title");
+      list.appendChild(header);
+      lastSection = section;
+    }
+    list.appendChild(contactItem(name, contact));
+  }
+
+  if (entries.length === 0) {
+    const empty = document.createElement("li");
+    empty.className = "contact-empty";
+    empty.textContent = t("contacts.empty");
+    list.appendChild(empty);
+  }
+}
+
+function contactItem(name: string, contact: Contact): HTMLElement {
+  const li = document.createElement("li");
+  li.dataset.name = name;
+  li.classList.toggle("active", current === name);
+  li.classList.toggle("unread", unread.has(name));
+  li.classList.add(`state-${contact.state}`);
 
   const dot = document.createElement("span");
-  dot.className = `dot status-${contact?.status ?? "offline"}`;
-  dot.title = t(`status.${contact?.status ?? "offline"}`);
+  dot.className = `dot status-${contact.status}`;
+  dot.title = t(`status.${contact.status}`);
+
   const names = document.createElement("div");
   names.className = "contact-names";
   const alias = document.createElement("span");
   alias.textContent = contactLabel(name);
   const user = document.createElement("small");
-  user.textContent = `@${name}`;
+  user.textContent =
+    contact.state === "outgoing" ? `@${name} · ${t("contacts.pending")}` : `@${name}`;
   names.append(alias, user);
   li.append(dot, names);
-  li.classList.toggle("unread", unread);
+
+  if (contact.state === "incoming") {
+    const actions = document.createElement("div");
+    actions.className = "contact-actions";
+    const accept = document.createElement("button");
+    accept.type = "button";
+    accept.className = "mini";
+    accept.textContent = t("contacts.accept");
+    accept.addEventListener("click", (e) => {
+      e.stopPropagation();
+      void respondToRequest(name, true);
+    });
+    const reject = document.createElement("button");
+    reject.type = "button";
+    reject.className = "mini secondary";
+    reject.textContent = t("contacts.reject");
+    reject.addEventListener("click", (e) => {
+      e.stopPropagation();
+      void respondToRequest(name, false);
+    });
+    actions.append(accept, reject);
+    li.appendChild(actions);
+  } else if (contact.state === "accepted") {
+    li.addEventListener("click", () => selectContact(name));
+  }
+  return li;
 }
 
-function ensureContact(name: string, alias?: string) {
-  if (contacts.has(name)) {
-    if (alias) {
-      contacts.get(name)!.alias = alias;
-      renderContactItem(name);
-      if (current === name) updateHeader();
+async function respondToRequest(name: string, accept: boolean) {
+  try {
+    await invoke(accept ? "accept_contact" : "remove_contact", { username: name });
+    await refreshContacts();
+  } catch (err) {
+    toast(tError(err));
+  }
+}
+
+/// Pulls the contact list from the server (states, aliases and presence).
+async function refreshContacts() {
+  try {
+    const entries = await invoke<ContactEntry[]>("get_contacts");
+    const seen = new Set<string>();
+    for (const entry of entries) {
+      seen.add(entry.username);
+      const existing = contacts.get(entry.username);
+      if (existing) {
+        existing.alias = entry.alias;
+        existing.state = entry.state;
+        existing.status = entry.status;
+      } else {
+        contacts.set(entry.username, {
+          alias: entry.alias,
+          state: entry.state,
+          status: entry.status,
+          messages: [],
+          loaded: false,
+        });
+      }
     }
-    return;
+    for (const name of [...contacts.keys()]) {
+      if (!seen.has(name)) contacts.delete(name);
+    }
+    if (current && !contacts.has(current)) closeConversation();
+    renderContactList();
+    if (current) updateHeader();
+  } catch (err) {
+    toast(tError(err));
   }
-  contacts.set(name, { alias: alias ?? name, status: "offline", messages: [], loaded: false });
-  const li = document.createElement("li");
-  li.dataset.name = name;
-  li.addEventListener("click", () => selectContact(name));
-  $("#contact-list").appendChild(li);
-  renderContactItem(name);
-  if (!alias) {
-    invoke<string>("add_contact", { username: name })
-      .then((a) => ensureContact(name, a || name))
-      .catch(() => {});
-  }
+}
+
+function closeConversation() {
+  current = null;
+  $("#conv-header").textContent = t("chat.pickContact");
+  ($("#send-input") as HTMLInputElement).disabled = true;
+  ($("#send-btn") as HTMLButtonElement).disabled = true;
+  ($("#emoji-btn") as HTMLButtonElement).disabled = true;
+  $("#messages").replaceChildren();
 }
 
 function updateHeader() {
@@ -125,10 +225,13 @@ function updateHeader() {
 }
 
 async function selectContact(name: string) {
+  if (contacts.get(name)?.state !== "accepted") return;
   current = name;
+  unread.delete(name);
   document.querySelectorAll("#contact-list li").forEach((li) => {
-    li.classList.toggle("active", (li as HTMLElement).dataset.name === name);
-    if ((li as HTMLElement).dataset.name === name) li.classList.remove("unread");
+    const target = (li as HTMLElement).dataset.name === name;
+    li.classList.toggle("active", target);
+    if (target) li.classList.remove("unread");
   });
   updateHeader();
   ($("#send-input") as HTMLInputElement).disabled = false;
@@ -184,33 +287,26 @@ function renderMessages() {
 }
 
 function addMessage(contact: string, msg: Message) {
-  ensureContact(contact);
+  const known = contacts.get(contact);
+  if (!known) {
+    // A message from someone not in the cached list: refresh and stash it.
+    void refreshContacts();
+    contacts.set(contact, {
+      alias: contact,
+      state: "accepted",
+      status: "offline",
+      messages: [],
+      loaded: true,
+    });
+  }
   contacts.get(contact)!.messages.push(msg);
   if (current === contact) {
     renderMessages();
   } else {
+    unread.add(contact);
     document
       .querySelector(`#contact-list li[data-name="${contact}"]`)
       ?.classList.add("unread");
-  }
-}
-
-// ---- Presencia ----
-
-async function refreshPresence() {
-  if (contacts.size === 0) return;
-  try {
-    const presence = await invoke<[string, string][]>("get_presence");
-    for (const [username, status] of presence) {
-      const contact = contacts.get(username);
-      if (contact && contact.status !== status) {
-        contact.status = status;
-        renderContactItem(username);
-        if (current === username) updateHeader();
-      }
-    }
-  } catch {
-    // Transient: the next poll will catch up.
   }
 }
 
@@ -235,15 +331,10 @@ async function enterChat(profile: ProfileInfo) {
     toast(tError(e));
     return;
   }
-  try {
-    const list = await invoke<[string, string][]>("get_contacts");
-    for (const [username, alias] of list) ensureContact(username, alias);
-  } catch {
-    /* sin contactos aún */
-  }
+  await refreshContacts();
   show("chat");
-  refreshPresence();
-  setInterval(refreshPresence, PRESENCE_POLL_MS);
+  // Presence and request states come with the contact list.
+  setInterval(refreshContacts, PRESENCE_POLL_MS);
 }
 
 async function boot() {
@@ -318,7 +409,7 @@ function refreshLanguage(next: Lang) {
   for (const id of ["#lang-input", "#settings-lang"]) {
     ($(id) as HTMLSelectElement).value = next;
   }
-  for (const name of contacts.keys()) renderContactItem(name);
+  renderContactList();
   renderMyStatus();
   if (current) updateHeader();
 }
@@ -404,11 +495,9 @@ $("#restore-btn").addEventListener("click", async () => {
       contact.loaded = false;
       contact.messages = [];
     }
-    const list = await invoke<[string, string][]>("get_contacts");
-    for (const [username, alias] of list) ensureContact(username, alias);
+    await refreshContacts();
     if (current) await selectContact(current);
     toast(count > 0 ? t("restore.done").replace("{n}", String(count)) : t("restore.empty"));
-    refreshPresence();
   } catch (err) {
     $("#settings-error").textContent = tError(err);
   } finally {
@@ -527,10 +616,10 @@ $("#add-contact-form").addEventListener("submit", async (e) => {
   input.value = "";
   if (!name || name === me) return;
   try {
-    const alias = await invoke<string>("add_contact", { username: name });
-    ensureContact(name, alias || name);
-    selectContact(name);
-    refreshPresence();
+    const state = await invoke<string>("request_contact", { username: name });
+    await refreshContacts();
+    toast(state === "accepted" ? t("contacts.nowContacts") : t("contacts.requestSent"));
+    if (state === "accepted") selectContact(name);
   } catch (err) {
     toast(`${t("error.addContactFailed")}: ${tError(err)}`);
   }
@@ -567,6 +656,7 @@ listen<{ id: string; sender: string; kind: string; text: string; created_at: num
   },
 );
 
+listen("hush://contacts", () => void refreshContacts());
 listen("hush://disconnected", () => toast(t("error.disconnected")));
 
 // ---- Pegar imágenes ----

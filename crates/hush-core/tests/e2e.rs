@@ -52,13 +52,20 @@ async fn onboard(base: &str, pool: &sqlx::SqlitePool, username: &str) -> (Engine
     (engine, api)
 }
 
+/// Waits for the next message, skipping contact-list notifications.
 async fn recv_one(
-    rx: &mut tokio::sync::mpsc::Receiver<hush_core::IncomingMessage>,
+    rx: &mut tokio::sync::mpsc::Receiver<hush_core::ServerEvent>,
 ) -> hush_core::IncomingMessage {
-    tokio::time::timeout(Duration::from_secs(5), rx.recv())
-        .await
-        .expect("timed out waiting for message")
-        .expect("stream closed")
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match rx.recv().await.expect("stream closed") {
+                hush_core::ServerEvent::Message(msg) => return msg,
+                hush_core::ServerEvent::ContactsChanged => continue,
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for message")
 }
 
 /// A second device restores the conversation history from the encrypted
@@ -89,6 +96,17 @@ async fn history_follows_the_user_to_a_new_device() {
         .await
         .unwrap();
     device1.connect().await.unwrap();
+    bob.connect().await.unwrap();
+
+    // Become contacts first: messaging strangers is refused.
+    device1.request_contact("bob").await.unwrap();
+    bob.accept_contact("alice").await.unwrap();
+    assert_eq!(
+        device1.contacts().await.unwrap()[0].state,
+        "accepted",
+        "the link must be visible from both sides"
+    );
+
     device1.send_text("bob", "mensaje que debe sobrevivir").await.unwrap();
     let recovery = device1.recovery_code().await.unwrap();
     assert!(recovery.contains('-'), "code is grouped for reading: {recovery}");
@@ -127,7 +145,12 @@ async fn history_follows_the_user_to_a_new_device() {
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].text, "mensaje que debe sobrevivir");
     assert!(history[0].mine);
-    assert!(device2.contacts().await.unwrap().iter().any(|(u, _)| u == "bob"));
+    assert!(device2
+        .contacts()
+        .await
+        .unwrap()
+        .iter()
+        .any(|c| c.username == "bob"));
 
     // Both devices now report the same key, and messages sent from the second
     // one land in the same archive.
@@ -160,6 +183,11 @@ async fn encrypted_roundtrip_with_offline_delivery() {
         alice_api.fetch_profile("bob").await.unwrap().alias,
         "Alias de bob"
     );
+
+    // Messaging requires an accepted contact link: the second request from
+    // the other side accepts the first.
+    alice_api.request_contact("bob").await.unwrap();
+    bob_api.request_contact("alice").await.unwrap();
 
     // Alice establishes a PQXDH session from Bob's public bundle and sends
     // while Bob is offline.

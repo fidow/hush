@@ -44,7 +44,9 @@ CREATE TABLE IF NOT EXISTS kyber_base_keys_seen (
 );
 CREATE TABLE IF NOT EXISTS contacts (
     username TEXT PRIMARY KEY,
-    alias    TEXT NOT NULL
+    alias    TEXT NOT NULL,
+    -- Mirror of the server's list: 'incoming', 'outgoing' or 'accepted'.
+    state    TEXT NOT NULL DEFAULT 'accepted'
 );
 CREATE TABLE IF NOT EXISTS messages (
     id         TEXT PRIMARY KEY,
@@ -93,6 +95,10 @@ impl LocalDb {
         // Migration for local dbs created before message kinds existed.
         let _ = conn.execute(
             "ALTER TABLE messages ADD COLUMN kind TEXT NOT NULL DEFAULT 'text'",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE contacts ADD COLUMN state TEXT NOT NULL DEFAULT 'accepted'",
             [],
         );
         Ok(Self {
@@ -172,21 +178,37 @@ impl LocalDb {
 
     // ---- contacts ----
 
-    pub fn upsert_contact(&self, username: &str, alias: &str) -> Result<()> {
+    pub fn upsert_contact(&self, username: &str, alias: &str, state: &str) -> Result<()> {
         self.with(|c| {
             c.execute(
-                "INSERT INTO contacts (username, alias) VALUES (?1, ?2)
-                 ON CONFLICT(username) DO UPDATE SET alias = excluded.alias",
-                params![username, alias],
+                "INSERT INTO contacts (username, alias, state) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(username) DO UPDATE SET alias = excluded.alias,
+                                                     state = excluded.state",
+                params![username, alias, state],
             )
             .map(|_| ())
         })
     }
 
-    pub fn contacts(&self) -> Result<Vec<(String, String)>> {
+    /// Replaces the cached list with the server's, which owns the truth.
+    pub fn replace_contacts(&self, contacts: &[(String, String, String)]) -> Result<()> {
         self.with(|c| {
-            c.prepare("SELECT username, alias FROM contacts ORDER BY username")?
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            c.execute("DELETE FROM contacts", [])?;
+            for (username, alias, state) in contacts {
+                c.execute(
+                    "INSERT INTO contacts (username, alias, state) VALUES (?1, ?2, ?3)",
+                    params![username, alias, state],
+                )?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Cached contacts as `(username, alias, state)`.
+    pub fn contacts(&self) -> Result<Vec<(String, String, String)>> {
+        self.with(|c| {
+            c.prepare("SELECT username, alias, state FROM contacts ORDER BY username")?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
                 .collect()
         })
     }

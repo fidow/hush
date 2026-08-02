@@ -89,6 +89,16 @@ CREATE TABLE IF NOT EXISTS archive (
     PRIMARY KEY (username, id)
 );
 CREATE INDEX IF NOT EXISTS idx_archive_user ON archive(username, created_at);
+-- Contact list. Every link is stored from both sides so each account can be
+-- listed on its own: A sees 'outgoing' while B sees 'incoming', and both
+-- flip to 'accepted' together.
+CREATE TABLE IF NOT EXISTS contacts (
+    owner      TEXT NOT NULL REFERENCES accounts(username),
+    peer       TEXT NOT NULL REFERENCES accounts(username),
+    state      TEXT NOT NULL CHECK (state IN ('incoming', 'outgoing', 'accepted')),
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (owner, peer)
+);
 "#;
 
 #[derive(Clone, Serialize, Debug)]
@@ -99,11 +109,19 @@ pub struct OutMessage {
     pub created_at: i64,
 }
 
+/// Something to push down an open SSE stream.
+#[derive(Clone, Debug)]
+enum Push {
+    Message(OutMessage),
+    /// The contact list changed; the client should re-fetch it.
+    ContactsChanged,
+}
+
 /// A live SSE listener. The id lets a stream remove *its own* entry on
 /// disconnect without evicting a newer connection from the same account.
 struct Listener {
     id: u64,
-    tx: mpsc::Sender<OutMessage>,
+    tx: mpsc::Sender<Push>,
 }
 
 type LiveMap = Arc<Mutex<HashMap<String, Listener>>>;
@@ -143,6 +161,12 @@ pub fn app(db: SqlitePool) -> Router {
         .route("/v1/profile/{username}", get(get_profile))
         .route("/v1/me", axum::routing::patch(update_me))
         .route("/v1/presence", post(query_presence))
+        .route("/v1/contacts", get(list_contacts))
+        .route(
+            "/v1/contacts/{peer}",
+            post(request_contact).delete(remove_contact),
+        )
+        .route("/v1/contacts/{peer}/accept", post(accept_contact))
         .route("/v1/keys", put(upload_keys))
         .route("/v1/keys/{username}", get(fetch_bundle))
         .route("/v1/messages/stream", get(message_stream))
@@ -687,6 +711,181 @@ async fn update_me(
     })))
 }
 
+/// Nudges a user's open stream so it re-fetches its contact list.
+async fn notify_contacts_changed(state: &AppState, username: &str) {
+    if let Some(listener) = state.live.lock().await.get(username) {
+        let _ = listener.tx.try_send(Push::ContactsChanged);
+    }
+}
+
+async fn link_state(db: &SqlitePool, owner: &str, peer: &str) -> Result<Option<String>, ApiError> {
+    Ok(
+        sqlx::query("SELECT state FROM contacts WHERE owner = ? AND peer = ?")
+            .bind(owner)
+            .bind(peer)
+            .fetch_optional(db)
+            .await
+            .map_err(internal)?
+            .map(|r| r.get::<String, _>(0)),
+    )
+}
+
+async fn set_link(
+    tx: &mut sqlx::SqliteConnection,
+    owner: &str,
+    peer: &str,
+    state: &str,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        "INSERT INTO contacts (owner, peer, state, created_at) VALUES (?, ?, ?, ?)
+         ON CONFLICT(owner, peer) DO UPDATE SET state = excluded.state",
+    )
+    .bind(owner)
+    .bind(peer)
+    .bind(state)
+    .bind(now())
+    .execute(&mut *tx)
+    .await
+    .map_err(internal)?;
+    Ok(())
+}
+
+/// The caller's contact list: accepted contacts and pending requests in both
+/// directions, with alias and current presence.
+async fn list_contacts(
+    auth: AuthUser,
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let rows = sqlx::query(
+        "SELECT c.peer, c.state, a.alias, a.status
+         FROM contacts c JOIN accounts a ON a.username = c.peer
+         WHERE c.owner = ? ORDER BY c.created_at",
+    )
+    .bind(&auth.username)
+    .fetch_all(&state.db)
+    .await
+    .map_err(internal)?;
+
+    let live = state.live.lock().await;
+    let contacts: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|r| {
+            let peer: String = r.get(0);
+            let connected = live.contains_key(&peer);
+            serde_json::json!({
+                "username": peer,
+                "state": r.get::<String, _>(1),
+                "alias": r.get::<String, _>(2),
+                "status": if connected { r.get::<String, _>(3) } else { "offline".into() },
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({ "contacts": contacts })))
+}
+
+/// Sends a contact request. If the peer already requested us, this accepts
+/// instead, so the two directions cannot deadlock.
+async fn request_contact(
+    auth: AuthUser,
+    State(state): State<AppState>,
+    Path(peer): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let peer = peer.to_lowercase();
+    if peer == auth.username {
+        return Err(bad_request("self_contact", "You cannot add yourself"));
+    }
+    let exists = sqlx::query("SELECT 1 FROM accounts WHERE username = ? AND verified = 1")
+        .bind(&peer)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(internal)?;
+    if exists.is_none() {
+        return Err(not_found());
+    }
+    if !state
+        .limits
+        .allow(&format!("contact:{}", auth.username), 60, HOUR, now())
+    {
+        return Err(too_many());
+    }
+
+    let existing = link_state(&state.db, &auth.username, &peer).await?;
+    let resulting_state = match existing.as_deref() {
+        Some("accepted") => {
+            return Err(err(
+                StatusCode::CONFLICT,
+                "already_contacts",
+                "You are already contacts",
+            ))
+        }
+        Some("outgoing") => {
+            return Err(err(
+                StatusCode::CONFLICT,
+                "request_pending",
+                "A request is already pending",
+            ))
+        }
+        // They asked first: this is an acceptance.
+        Some("incoming") => "accepted",
+        _ => "outgoing",
+    };
+
+    let mut tx = state.db.begin().await.map_err(internal)?;
+    set_link(&mut tx, &auth.username, &peer, resulting_state).await?;
+    set_link(
+        &mut tx,
+        &peer,
+        &auth.username,
+        if resulting_state == "accepted" { "accepted" } else { "incoming" },
+    )
+    .await?;
+    tx.commit().await.map_err(internal)?;
+
+    tracing::info!(from = %auth.username, to = %peer, state = %resulting_state, "solicitud de contacto");
+    notify_contacts_changed(&state, &peer).await;
+    Ok(Json(serde_json::json!({ "state": resulting_state })))
+}
+
+/// Accepts a pending incoming request.
+async fn accept_contact(
+    auth: AuthUser,
+    State(state): State<AppState>,
+    Path(peer): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let peer = peer.to_lowercase();
+    if link_state(&state.db, &auth.username, &peer).await?.as_deref() != Some("incoming") {
+        return Err(bad_request("no_request", "There is no request to accept"));
+    }
+    let mut tx = state.db.begin().await.map_err(internal)?;
+    set_link(&mut tx, &auth.username, &peer, "accepted").await?;
+    set_link(&mut tx, &peer, &auth.username, "accepted").await?;
+    tx.commit().await.map_err(internal)?;
+
+    tracing::info!(user = %auth.username, peer = %peer, "contacto aceptado");
+    notify_contacts_changed(&state, &peer).await;
+    Ok(Json(serde_json::json!({ "state": "accepted" })))
+}
+
+/// Rejects a request, cancels one we sent, or removes an existing contact.
+async fn remove_contact(
+    auth: AuthUser,
+    State(state): State<AppState>,
+    Path(peer): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let peer = peer.to_lowercase();
+    sqlx::query("DELETE FROM contacts WHERE (owner = ? AND peer = ?) OR (owner = ? AND peer = ?)")
+        .bind(&auth.username)
+        .bind(&peer)
+        .bind(&peer)
+        .bind(&auth.username)
+        .execute(&state.db)
+        .await
+        .map_err(internal)?;
+    tracing::info!(user = %auth.username, peer = %peer, "contacto eliminado");
+    notify_contacts_changed(&state, &peer).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[derive(Deserialize)]
 struct PresenceRequest {
     usernames: Vec<String>,
@@ -884,6 +1083,15 @@ async fn send_message(
     if exists.is_none() {
         return Err(not_found());
     }
+    // Messaging is contacts-only: an accepted link is what a contact request
+    // buys you, and it also keeps strangers from filling anyone's mailbox.
+    if link_state(&state.db, &recipient, &auth.username).await?.as_deref() != Some("accepted") {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "not_a_contact",
+            "You can only message accepted contacts",
+        ));
+    }
 
     // Cap the undelivered queue so one sender cannot fill the disk (or a
     // recipient's memory on reconnect) by flooding an offline account.
@@ -921,7 +1129,7 @@ async fn send_message(
     tracing::debug!(from = %msg.sender, to = %recipient, id = %msg.id, "mensaje encolado");
     // Best-effort live push; the SSE backlog query covers anyone offline.
     if let Some(listener) = state.live.lock().await.get(&recipient) {
-        let _ = listener.tx.try_send(msg.clone());
+        let _ = listener.tx.try_send(Push::Message(msg.clone()));
         tracing::debug!(to = %recipient, id = %msg.id, "entrega en vivo (SSE)");
     }
     Ok(Json(SendMessageResponse { id: msg.id }))
@@ -931,7 +1139,7 @@ async fn message_stream(
     auth: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>, ApiError> {
-    let (tx, rx) = mpsc::channel::<OutMessage>(256);
+    let (tx, rx) = mpsc::channel::<Push>(256);
     let listener_id = state.next_listener_id.fetch_add(1, Ordering::Relaxed);
     state.live.lock().await.insert(
         auth.username.clone(),
@@ -966,18 +1174,21 @@ async fn message_stream(
                 body: r.get(2),
                 created_at: r.get(3),
             };
-            if tx.send(msg).await.is_err() {
+            if tx.send(Push::Message(msg)).await.is_err() {
                 return;
             }
         }
     });
 
-    let stream = ReceiverStream::new(rx).map(move |msg| {
+    let stream = ReceiverStream::new(rx).map(move |push| {
         // Moving the guard into the closure ties its lifetime to the stream.
         let _keep = &cleanup;
-        Ok(Event::default()
-            .event("message")
-            .data(serde_json::to_string(&msg).expect("OutMessage serializes")))
+        Ok(match push {
+            Push::Message(msg) => Event::default()
+                .event("message")
+                .data(serde_json::to_string(&msg).expect("OutMessage serializes")),
+            Push::ContactsChanged => Event::default().event("contacts").data("{}"),
+        })
     });
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }

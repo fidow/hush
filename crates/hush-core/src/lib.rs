@@ -11,8 +11,8 @@ pub mod db;
 pub mod engine;
 pub mod store;
 
-pub use api::{ApiClient, IncomingMessage, RemoteProfile};
-pub use client::{DecryptedMessage, HushClient, ProfileInfo};
+pub use api::{ApiClient, ContactEntry, IncomingMessage, RemoteProfile, ServerEvent};
+pub use client::{ClientEvent, DecryptedMessage, HushClient, ProfileInfo};
 pub use db::{LocalDb, Profile, StoredMessage};
 pub use engine::Engine;
 
