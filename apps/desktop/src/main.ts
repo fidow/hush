@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { CATEGORIES, MAX_RECENT, RECENT_KEY } from "./emoji";
 import { applyTranslations, LANGUAGES, lang, setLang, t, tError, type Lang } from "./i18n";
 import {
@@ -67,8 +68,10 @@ interface Contact {
 /// deployments here and both the sign-in and register forms pick them up.
 /// The local one is a development convenience and is left out of packaged
 /// builds, where it would only offer a connection that cannot work.
+const WEBSITE = "https://hush.villasante.es";
+
 const SERVERS: { name: string; url: string }[] = [
-  { name: "Main Hush", url: "https://hush.villasante.es" },
+  { name: "Main Hush", url: WEBSITE },
   ...(import.meta.env.DEV ? [{ name: "Local", url: "http://127.0.0.1:8080" }] : []),
 ];
 
@@ -301,43 +304,40 @@ function updateConversationPane() {
   );
 }
 
-/// "hace 5 minutos" / "5 minutes ago", in the active language.
-function relativeTime(timestamp: number): string {
-  const seconds = Math.round((timestamp - Date.now()) / 1000);
-  const units: [Intl.RelativeTimeFormatUnit, number][] = [
-    ["second", 60],
-    ["minute", 60],
-    ["hour", 24],
-    ["day", 7],
-    ["week", 4.35],
-    ["month", 12],
-    ["year", Infinity],
-  ];
-  let value = seconds;
-  for (const [unit, span] of units) {
-    if (Math.abs(value) < span) {
-      return new Intl.RelativeTimeFormat(lang(), { numeric: "auto" }).format(
-        Math.round(value),
-        unit,
-      );
-    }
-    value /= span;
-  }
-  return new Date(timestamp).toLocaleDateString(lang());
+/// The clock time in this machine's timezone: "14:32" today, "2 ago, 14:32"
+/// on an earlier day. A relative "5 minutes ago" reads well for a moment and
+/// badly afterwards, when what you want to know is when they were around.
+function clockTime(timestamp: number): string {
+  const date = new Date(timestamp);
+  const time = date.toLocaleTimeString(lang(), { hour: "2-digit", minute: "2-digit" });
+  if (date.toDateString() === new Date().toDateString()) return time;
+  const day = date.toLocaleDateString(lang(), { day: "numeric", month: "short" });
+  return `${day}, ${time}`;
+}
+
+/// The same instant spelled out, timezone included, for the tooltip.
+function fullTime(timestamp: number): string {
+  return new Date(timestamp).toLocaleString(lang(), {
+    dateStyle: "full",
+    timeStyle: "long",
+  });
 }
 
 function presenceLabel(contact: Contact | undefined): string {
   if (!contact) return t("status.offline");
   if (contact.status !== "offline") return t(`status.${contact.status}`);
   return contact.lastSeen
-    ? t("status.lastSeen").replace("{when}", relativeTime(contact.lastSeen))
+    ? t("status.lastSeen").replace("{when}", clockTime(contact.lastSeen))
     : t("status.offline");
 }
 
 function updateHeader() {
   if (!current) return;
-  $("#conv-header").textContent =
-    `🔒 ${contactLabel(current)} · @${current} · ${presenceLabel(contacts.get(current))}`;
+  const header = $("#conv-header");
+  const contact = contacts.get(current);
+  header.textContent = `🔒 ${contactLabel(current)} · @${current} · ${presenceLabel(contact)}`;
+  header.title =
+    contact?.status === "offline" && contact.lastSeen ? fullTime(contact.lastSeen) : "";
 }
 
 async function selectContact(name: string) {
@@ -411,7 +411,7 @@ function renderMessages() {
       ticks.title = t(`receipt.${msg.state}`);
       div.appendChild(ticks);
     }
-    div.title = new Date(msg.created_at).toLocaleTimeString();
+    div.title = fullTime(msg.created_at);
     container.appendChild(div);
   }
   container.scrollTop = container.scrollHeight;
@@ -790,6 +790,13 @@ async function fillAbout() {
   $("#about-server").textContent = server ? server.name : myServer || "—";
   $("#about-encryption").textContent = "PQXDH · X25519 + Kyber-1024 · Double Ratchet";
 }
+
+// The site opens in the browser: a webview showing a web page inside the app
+// is a window the user cannot navigate out of.
+$("#about-website").addEventListener("click", (e) => {
+  e.preventDefault();
+  void openUrl(WEBSITE);
+});
 
 // Alert switches apply immediately; the sound one previews itself so the
 // user hears what they just turned on.

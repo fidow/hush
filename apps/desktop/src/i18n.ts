@@ -123,6 +123,7 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "about.server": "Servidor",
     "about.encryption": "Cifrado",
     "about.license": "Licencia",
+    "about.website": "Sitio web",
     "about.note":
       "Los mensajes van cifrados de extremo a extremo: el servidor solo transporta datos que no puede leer. El intercambio de claves es resistente a computación cuántica, y lo que se guarda en este equipo está cifrado con una clave propia del dispositivo.",
 
@@ -347,6 +348,7 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "about.server": "Server",
     "about.encryption": "Encryption",
     "about.license": "Licence",
+    "about.website": "Website",
     "about.note":
       "Messages are end-to-end encrypted: the server only carries data it cannot read. The key exchange is quantum-resistant, and whatever is stored on this computer is encrypted with a key belonging to this device.",
 

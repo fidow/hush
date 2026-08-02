@@ -1,9 +1,75 @@
 use std::ffi::OsString;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use anyhow::Context;
 use hush_server::mail;
+
+/// Timestamps in local time. The default formatter writes UTC, which means the
+/// log cannot be lined up with Apache's or the Windows event log without doing
+/// the offset arithmetic by hand.
+struct LocalTime;
+
+impl tracing_subscriber::fmt::time::FormatTime for LocalTime {
+    fn format_time(&self, w: &mut tracing_subscriber::fmt::format::Writer<'_>) -> std::fmt::Result {
+        write!(w, "{}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f %:z"))
+    }
+}
+
+/// Daily rotation on *local* dates, writing `<name>.<yyyy-mm-dd>`.
+///
+/// `tracing_appender::rolling::daily` rotates on the UTC date, so on a UTC+2
+/// machine the file named for a day actually starts at 02:00 local time and
+/// the first two hours of each day land in the previous day's file.
+struct LocalDailyFile {
+    directory: PathBuf,
+    name: OsString,
+    /// The day currently open, and its handle.
+    current: Option<(String, std::fs::File)>,
+}
+
+impl LocalDailyFile {
+    fn new(directory: PathBuf, name: OsString) -> Self {
+        Self {
+            directory,
+            name,
+            current: None,
+        }
+    }
+
+    /// The file for today, reopening it when the local date has moved on.
+    fn today(&mut self) -> std::io::Result<&mut std::fs::File> {
+        self.file_for(&chrono::Local::now().format("%Y-%m-%d").to_string())
+    }
+
+    fn file_for(&mut self, today: &str) -> std::io::Result<&mut std::fs::File> {
+        if self.current.as_ref().is_none_or(|(day, _)| day != today) {
+            let mut path = self.name.clone();
+            path.push(format!(".{today}"));
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(self.directory.join(path))?;
+            self.current = Some((today.to_string(), file));
+        }
+        // Just assigned above when it was missing.
+        Ok(&mut self.current.as_mut().expect("file is open").1)
+    }
+}
+
+impl Write for LocalDailyFile {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.today()?.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match &mut self.current {
+            Some((_, file)) => file.flush(),
+            None => Ok(()),
+        }
+    }
+}
 
 /// Days of rotated logs to keep. `HUSH_LOG_KEEP_DAYS=0` disables the cleanup
 /// and keeps everything.
@@ -65,6 +131,29 @@ fn prune_old_logs(directory: &Path, name: &OsString, keep_days: u64) {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_log_moves_to_a_new_file_when_the_day_changes() {
+        let dir = std::env::temp_dir().join(format!("hush-log-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut log = LocalDailyFile::new(dir.clone(), "hush.log".into());
+
+        log.file_for("2026-08-02").unwrap().write_all(b"late\n").unwrap();
+        log.file_for("2026-08-03").unwrap().write_all(b"early\n").unwrap();
+        // Same day again: keeps appending instead of truncating.
+        log.file_for("2026-08-03").unwrap().write_all(b"later\n").unwrap();
+
+        let read = |day: &str| std::fs::read_to_string(dir.join(format!("hush.log.{day}"))).unwrap();
+        assert_eq!(read("2026-08-02"), "late\n");
+        assert_eq!(read("2026-08-03"), "early\nlater\n");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Debug mode is toggled via HUSH_LOG, e.g. HUSH_LOG=debug (default: info).
@@ -92,12 +181,15 @@ async fn main() -> anyhow::Result<()> {
             std::fs::create_dir_all(&directory).with_context(|| {
                 format!("cannot create log directory {}", directory.display())
             })?;
-            let (writer, guard) =
-                tracing_appender::non_blocking(tracing_appender::rolling::daily(&directory, &name));
+            let (writer, guard) = tracing_appender::non_blocking(LocalDailyFile::new(
+                directory.clone(),
+                name.clone(),
+            ));
             tracing_subscriber::fmt()
                 .with_env_filter(filter)
                 // Escape codes would end up as noise in a file.
                 .with_ansi(false)
+                .with_timer(LocalTime)
                 .with_writer(writer)
                 .init();
             tracing::info!("logging to {}", directory.join(&name).display());
@@ -105,7 +197,10 @@ async fn main() -> anyhow::Result<()> {
             Some(guard)
         }
         _ => {
-            tracing_subscriber::fmt().with_env_filter(filter).init();
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .with_timer(LocalTime)
+                .init();
             None
         }
     };

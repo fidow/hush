@@ -172,6 +172,10 @@ impl LocalDb {
         ] {
             let _ = conn.execute(&format!("ALTER TABLE messages ADD COLUMN {column}"), []);
         }
+        // Earlier versions stored the "delete for everyone" instruction as a
+        // message, so conversations showed a line with the id of the message
+        // that had just been deleted.
+        let _ = conn.execute("DELETE FROM messages WHERE kind = 'delete'", []);
         // An encrypted database whose key file is gone would otherwise get a
         // brand new key and read back as garbage, so say what happened.
         let sealed: Option<String> = conn

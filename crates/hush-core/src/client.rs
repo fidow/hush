@@ -441,9 +441,15 @@ struct Actor {
     session: Option<Session>,
     events: Option<mpsc::Sender<ClientEvent>>,
     /// Key protecting the history archive; absent until the user provides
-    /// their history passphrase on this device.
+    /// their recovery key on this device.
     archive_key: Option<ArchiveKey>,
+    /// When we last rebuilt the session with each contact, so a backlog of
+    /// unreadable messages does not trigger one repair per message.
+    repairs: std::collections::HashMap<String, i64>,
 }
+
+/// How long to wait before rebuilding the session with the same contact again.
+const REPAIR_INTERVAL_MS: i64 = 60_000;
 
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -519,6 +525,9 @@ impl Actor {
     /// Re-encrypts a message under the history key and uploads it. Best
     /// effort: a failure here must never break sending or receiving.
     async fn archive_message(&self, msg: &StoredMessage) {
+        if Self::is_control(&msg.kind) {
+            return;
+        }
         let (Some(key), Some(session)) = (self.archive_key.as_ref(), self.session.as_ref()) else {
             return;
         };
@@ -564,6 +573,12 @@ impl Actor {
             match key.decrypt_entry(blob) {
                 Ok(entry) => {
                     let msg = StoredMessage::from(entry);
+                    // Control messages were archived by versions that treated
+                    // them as ordinary ones; drop them here and clean up.
+                    if Self::is_control(&msg.kind) {
+                        let _ = session.api.delete_archive_entry(&msg.id).await;
+                        continue;
+                    }
                     // Remember the contact too, so restored chats are listed.
                     let _ = self.db.upsert_contact(&msg.contact, &msg.contact, "accepted");
                     if self.db.add_message(&msg).is_ok() {
@@ -670,6 +685,47 @@ impl Actor {
         Ok(session.api.stream().await?)
     }
 
+    /// Instructions for the other device rather than something a person wrote.
+    /// They travel as ordinary encrypted messages so the server cannot tell
+    /// them apart, but they belong in no conversation.
+    fn is_control(kind: &str) -> bool {
+        matches!(kind, "delete" | "rekey")
+    }
+
+    /// Rebuilds the session with `peer` after a message we could not decrypt.
+    ///
+    /// That happens when they still hold a ratchet we no longer have — their
+    /// device kept the session while ours lost it, or a handshake never
+    /// arrived. Dropping those messages silently, as we must, would leave the
+    /// conversation dead in that direction for good. Sending anything back
+    /// carries a fresh handshake, which replaces the session on their side
+    /// too, so the next message they send is readable.
+    ///
+    /// The message that triggered this is still lost: it was encrypted for a
+    /// ratchet that no longer exists.
+    async fn repair_session(&mut self, peer: &str) {
+        let now = now_ms();
+        if let Some(last) = self.repairs.get(peer) {
+            // A burst of undecryptable messages is one broken session, not one
+            // per message.
+            if now.saturating_sub(*last) < REPAIR_INTERVAL_MS {
+                return;
+            }
+        }
+        self.repairs.insert(peer.to_string(), now);
+
+        if let Some(session) = self.session.as_mut() {
+            if let Err(e) = session.engine.reset_session(peer) {
+                tracing::warn!("cannot drop the stale session with {peer}: {e}");
+                return;
+            }
+        }
+        tracing::info!("rebuilding the session with {peer} after an unreadable message");
+        if let Err(e) = self.handle_send(peer, "rekey", "").await {
+            tracing::warn!("cannot rebuild the session with {peer}: {e}");
+        }
+    }
+
     async fn handle_send(
         &mut self,
         recipient: &str,
@@ -712,7 +768,11 @@ impl Actor {
             read_at: None,
             created_at: now_ms(),
         };
-        self.db.add_message(&stored)?;
+        // A control message would otherwise show up in our own conversation as
+        // a line containing the id of the message it refers to.
+        if !Self::is_control(kind) {
+            self.db.add_message(&stored)?;
+        }
         self.db.upsert_contact(recipient, &remote.alias, "accepted")?;
         Ok(stored)
     }
@@ -804,6 +864,14 @@ impl Actor {
                 let _ = session.api.ack_message(&msg.id).await;
                 let (kind, text) = decode_content(&plain);
 
+                // Nothing to do beyond having received it: decrypting it
+                // already adopted the sender's new session, so what we send
+                // next is readable on their side.
+                if kind == "rekey" {
+                    tracing::info!("{} rebuilt the session with us", msg.sender);
+                    return None;
+                }
+
                 // A control message, not something to show: the sender
                 // deleted a message and wants our copy gone too.
                 if kind == "delete" {
@@ -870,6 +938,7 @@ impl Actor {
                 // Ack anyway: an undecryptable message (stale session from a
                 // previous device) would otherwise be redelivered forever.
                 let _ = session.api.ack_message(&msg.id).await;
+                self.repair_session(&msg.sender).await;
                 None
             }
         }
@@ -890,6 +959,7 @@ async fn actor(db_path: PathBuf, mut commands: mpsc::Receiver<Command>) {
         session: None,
         events: None,
         archive_key: None,
+        repairs: std::collections::HashMap::new(),
     };
     let mut stream: Option<mpsc::Receiver<ServerEvent>> = None;
 

@@ -173,6 +173,209 @@ async fn history_follows_the_user_to_a_new_device() {
     assert!(texts.contains(&"desde el segundo dispositivo".to_string()));
 }
 
+/// Waits for `text` to show up in the conversation with `contact`.
+async fn wait_for_text(client: &hush_core::HushClient, contact: &str, text: &str) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let history = client.history(contact).await.unwrap();
+        if history.iter().any(|m| m.text == text) {
+            return;
+        }
+        if std::time::Instant::now() > deadline {
+            let seen: Vec<String> = history.into_iter().map(|m| m.text).collect();
+            panic!("the conversation with {contact} never showed {text:?}; it holds {seen:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Blocking someone, lifting the block and adding them again has to leave a
+/// working conversation: both sides must see what the other sends afterwards.
+#[tokio::test]
+async fn talking_again_after_a_block_works_both_ways() {
+    use hush_core::HushClient;
+
+    let (base, pool) = spawn_server().await;
+    let dir = std::env::temp_dir().join(format!("hush-block-{}", uuid::Uuid::new_v4()));
+
+    let alice = HushClient::spawn(dir.join("alice.db"));
+    alice
+        .register(&base, "alice", "Alicia", "alice@example.com", "supersecreta")
+        .await
+        .unwrap();
+    alice.verify(&pending_code(&pool, "alice").await).await.unwrap();
+    let bob = HushClient::spawn(dir.join("bob.db"));
+    bob.register(&base, "bob", "Roberto", "bob@example.com", "supersecreta")
+        .await
+        .unwrap();
+    bob.verify(&pending_code(&pool, "bob").await).await.unwrap();
+    alice.connect().await.unwrap();
+    bob.connect().await.unwrap();
+
+    alice.request_contact("bob").await.unwrap();
+    bob.accept_contact("alice").await.unwrap();
+    alice.send_text("bob", "antes del bloqueo").await.unwrap();
+    wait_for_text(&bob, "alice", "antes del bloqueo").await;
+    bob.send_text("alice", "recibido").await.unwrap();
+    wait_for_text(&alice, "bob", "recibido").await;
+
+    // Bob blocks, thinks better of it, and they become contacts again.
+    bob.block_contact("alice").await.unwrap();
+    bob.remove_contact("alice").await.unwrap();
+    alice.request_contact("bob").await.unwrap();
+    bob.accept_contact("alice").await.unwrap();
+
+    alice.send_text("bob", "después del desbloqueo").await.unwrap();
+    wait_for_text(&bob, "alice", "después del desbloqueo").await;
+    bob.send_text("alice", "yo también te veo").await.unwrap();
+    wait_for_text(&alice, "bob", "yo también te veo").await;
+}
+
+/// A device that lost its session state — a reinstall, a database recreated
+/// by hand — still holds the account keys, so the other side keeps encrypting
+/// under a ratchet that no longer exists there. Those messages cannot be
+/// decrypted, and silently dropping them means the conversation is dead in one
+/// direction for good, which is what "my messages never reach them" looks
+/// like. The client has to notice and rebuild the session.
+#[tokio::test]
+async fn a_contact_who_lost_their_session_can_be_reached_again() {
+    use hush_core::HushClient;
+
+    let (base, pool) = spawn_server().await;
+    let dir = std::env::temp_dir().join(format!("hush-lost-{}", uuid::Uuid::new_v4()));
+
+    let alice = HushClient::spawn(dir.join("alice.db"));
+    alice
+        .register(&base, "alice", "Alicia", "alice@example.com", "supersecreta")
+        .await
+        .unwrap();
+    alice.verify(&pending_code(&pool, "alice").await).await.unwrap();
+    let bob = HushClient::spawn(dir.join("bob.db"));
+    bob.register(&base, "bob", "Roberto", "bob@example.com", "supersecreta")
+        .await
+        .unwrap();
+    bob.verify(&pending_code(&pool, "bob").await).await.unwrap();
+    alice.connect().await.unwrap();
+    bob.connect().await.unwrap();
+
+    alice.request_contact("bob").await.unwrap();
+    bob.accept_contact("alice").await.unwrap();
+
+    // A full round trip, so Alice's session is established and she stops
+    // attaching the handshake to every message.
+    alice.send_text("bob", "hola").await.unwrap();
+    wait_for_text(&bob, "alice", "hola").await;
+    bob.send_text("alice", "hola alicia").await.unwrap();
+    wait_for_text(&alice, "bob", "hola alicia").await;
+
+    // Bob's session state disappears while his account keys stay.
+    let bob_db = rusqlite::Connection::open(dir.join("bob.db")).unwrap();
+    bob_db.execute("DELETE FROM sessions", []).unwrap();
+    drop(bob_db);
+
+    // This one is lost: it is encrypted under the ratchet Bob no longer has.
+    alice.send_text("bob", "primero tras el incidente").await.unwrap();
+
+    // But the conversation has to come back by itself.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    alice.send_text("bob", "segundo tras el incidente").await.unwrap();
+    wait_for_text(&bob, "alice", "segundo tras el incidente").await;
+    bob.send_text("alice", "te vuelvo a leer").await.unwrap();
+    wait_for_text(&alice, "bob", "te vuelvo a leer").await;
+}
+
+/// A message that never arrives can leave the sender holding a session the
+/// receiver knows nothing about — blocking someone drops whatever they had
+/// queued, which is exactly how that happens. Every later message would then
+/// be undecryptable, so the two sides must be able to repair the session.
+#[tokio::test]
+async fn a_session_the_other_side_never_saw_gets_rebuilt() {
+    use hush_core::HushClient;
+
+    let (base, pool) = spawn_server().await;
+    let dir = std::env::temp_dir().join(format!("hush-rekey-{}", uuid::Uuid::new_v4()));
+
+    let alice = HushClient::spawn(dir.join("alice.db"));
+    alice
+        .register(&base, "alice", "Alicia", "alice@example.com", "supersecreta")
+        .await
+        .unwrap();
+    alice.verify(&pending_code(&pool, "alice").await).await.unwrap();
+    let bob = HushClient::spawn(dir.join("bob.db"));
+    bob.register(&base, "bob", "Roberto", "bob@example.com", "supersecreta")
+        .await
+        .unwrap();
+    bob.verify(&pending_code(&pool, "bob").await).await.unwrap();
+    alice.connect().await.unwrap();
+
+    alice.request_contact("bob").await.unwrap();
+    bob.accept_contact("alice").await.unwrap();
+
+    // Bob is offline, so this queues on the server: it carries the handshake
+    // that would have set up his side of the session.
+    alice.send_text("bob", "mientras estabas fuera").await.unwrap();
+
+    // The block drops the queue, taking the handshake with it.
+    bob.block_contact("alice").await.unwrap();
+    bob.remove_contact("alice").await.unwrap();
+    alice.request_contact("bob").await.unwrap();
+    bob.accept_contact("alice").await.unwrap();
+    bob.connect().await.unwrap();
+
+    // Alice still holds the session Bob never learned about.
+    alice.send_text("bob", "hola otra vez").await.unwrap();
+    wait_for_text(&bob, "alice", "hola otra vez").await;
+
+    // And the repair has to work in both directions afterwards.
+    bob.send_text("alice", "ahora sí te leo").await.unwrap();
+    wait_for_text(&alice, "bob", "ahora sí te leo").await;
+}
+
+/// Deleting a message for everyone travels as a control message; it must not
+/// end up in the sender's own conversation as a message showing an id.
+#[tokio::test]
+async fn deleting_for_everyone_leaves_no_trace_in_the_history() {
+    use hush_core::HushClient;
+
+    let (base, pool) = spawn_server().await;
+    let dir = std::env::temp_dir().join(format!("hush-delete-{}", uuid::Uuid::new_v4()));
+
+    let alice = HushClient::spawn(dir.join("alice.db"));
+    alice
+        .register(&base, "alice", "Alicia", "alice@example.com", "supersecreta")
+        .await
+        .unwrap();
+    alice.verify(&pending_code(&pool, "alice").await).await.unwrap();
+    let bob = HushClient::spawn(dir.join("bob.db"));
+    bob.register(&base, "bob", "Roberto", "bob@example.com", "supersecreta")
+        .await
+        .unwrap();
+    bob.verify(&pending_code(&pool, "bob").await).await.unwrap();
+    alice.connect().await.unwrap();
+    bob.connect().await.unwrap();
+
+    alice.request_contact("bob").await.unwrap();
+    bob.accept_contact("alice").await.unwrap();
+    let sent = alice.send_text("bob", "esto se borra").await.unwrap();
+    wait_for_text(&bob, "alice", "esto se borra").await;
+
+    alice.delete_message(&sent.id, true).await.unwrap();
+    assert!(
+        alice.history("bob").await.unwrap().is_empty(),
+        "the deleted message and the control message must both be gone"
+    );
+
+    // And it must not come back when another device restores the archive.
+    let recovery = alice.recovery_code().await.unwrap();
+    let device2 = HushClient::spawn(dir.join("device2.db"));
+    device2.login(&base, "alice", "supersecreta").await.unwrap();
+    device2.restore_history(&recovery).await.ok();
+    assert!(
+        device2.history("bob").await.unwrap().is_empty(),
+        "the archive must not hold control messages either"
+    );
+}
+
 #[tokio::test]
 async fn encrypted_roundtrip_with_offline_delivery() {
     let (base, pool) = spawn_server().await;

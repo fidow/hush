@@ -38,7 +38,9 @@ unexpected location.
 
 The log path is configured separately, in `HUSH_LOG_FILE`, and accepts any
 absolute location — another drive or a network share — creating the folder if
-needed. It rotates daily (`hush.log.2026-08-02`) and cleans up after itself:
+needed. It rotates at local midnight (`hush.log.2026-08-02`, and the timestamps
+inside carry the machine's UTC offset, so the log lines up with Apache's) and
+cleans up after itself:
 `HUSH_LOG_KEEP_DAYS` (30 by default, `0` to never delete) removes older rotated
 files at startup and once a day. It only deletes files it generated, so it is
 safe to point at a folder shared with other logs. Without `HUSH_LOG_FILE` the
