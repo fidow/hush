@@ -124,7 +124,7 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "about.encryption": "Cifrado",
     "about.license": "Licencia",
     "about.note":
-      "Los mensajes van cifrados de extremo a extremo: el servidor solo transporta datos que no puede leer. El intercambio de claves es resistente a computación cuántica.",
+      "Los mensajes van cifrados de extremo a extremo: el servidor solo transporta datos que no puede leer. El intercambio de claves es resistente a computación cuántica, y lo que se guarda en este equipo está cifrado con una clave propia del dispositivo.",
 
     "recovery.title": "Clave de recuperación",
     "recovery.note":
@@ -348,7 +348,7 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "about.encryption": "Encryption",
     "about.license": "Licence",
     "about.note":
-      "Messages are end-to-end encrypted: the server only carries data it cannot read. The key exchange is quantum-resistant.",
+      "Messages are end-to-end encrypted: the server only carries data it cannot read. The key exchange is quantum-resistant, and whatever is stored on this computer is encrypted with a key belonging to this device.",
 
     "recovery.title": "Recovery key",
     "recovery.note":

@@ -30,7 +30,7 @@ pub struct SqliteSessionStore {
 #[async_trait(?Send)]
 impl SessionStore for SqliteSessionStore {
     async fn load_session(&self, address: &ProtocolAddress) -> Result<Option<SessionRecord>> {
-        let blob: Option<Vec<u8>> = self
+        let blob: Option<String> = self
             .db
             .with(|c| {
                 c.query_row(
@@ -41,7 +41,12 @@ impl SessionStore for SqliteSessionStore {
                 .optional()
             })
             .map_err(db_err)?;
-        blob.map(|b| SessionRecord::deserialize(&b)).transpose()
+        blob
+            .map(|b| {
+                let raw = self.db.open_bytes(&b).map_err(db_err)?;
+                SessionRecord::deserialize(&raw)
+            })
+            .transpose()
     }
 
     async fn store_session(
@@ -49,7 +54,7 @@ impl SessionStore for SqliteSessionStore {
         address: &ProtocolAddress,
         record: &SessionRecord,
     ) -> Result<()> {
-        let blob = record.serialize()?;
+        let blob = self.db.seal_bytes(&record.serialize()?).map_err(db_err)?;
         self.db
             .with(|c| {
                 c.execute(
@@ -71,7 +76,7 @@ pub struct SqlitePreKeyStore {
 #[async_trait(?Send)]
 impl PreKeyStore for SqlitePreKeyStore {
     async fn get_pre_key(&self, prekey_id: PreKeyId) -> Result<PreKeyRecord> {
-        let blob: Option<Vec<u8>> = self
+        let blob: Option<String> = self
             .db
             .with(|c| {
                 c.query_row(
@@ -82,11 +87,15 @@ impl PreKeyStore for SqlitePreKeyStore {
                 .optional()
             })
             .map_err(db_err)?;
-        PreKeyRecord::deserialize(&blob.ok_or(SignalProtocolError::InvalidPreKeyId)?)
+        let raw = self
+            .db
+            .open_bytes(&blob.ok_or(SignalProtocolError::InvalidPreKeyId)?)
+            .map_err(db_err)?;
+        PreKeyRecord::deserialize(&raw)
     }
 
     async fn save_pre_key(&mut self, prekey_id: PreKeyId, record: &PreKeyRecord) -> Result<()> {
-        let blob = record.serialize()?;
+        let blob = self.db.seal_bytes(&record.serialize()?).map_err(db_err)?;
         self.db
             .with(|c| {
                 c.execute(
@@ -116,7 +125,7 @@ pub struct SqliteSignedPreKeyStore {
 #[async_trait(?Send)]
 impl SignedPreKeyStore for SqliteSignedPreKeyStore {
     async fn get_signed_pre_key(&self, id: SignedPreKeyId) -> Result<SignedPreKeyRecord> {
-        let blob: Option<Vec<u8>> = self
+        let blob: Option<String> = self
             .db
             .with(|c| {
                 c.query_row(
@@ -127,7 +136,11 @@ impl SignedPreKeyStore for SqliteSignedPreKeyStore {
                 .optional()
             })
             .map_err(db_err)?;
-        SignedPreKeyRecord::deserialize(&blob.ok_or(SignalProtocolError::InvalidSignedPreKeyId)?)
+        let raw = self
+            .db
+            .open_bytes(&blob.ok_or(SignalProtocolError::InvalidSignedPreKeyId)?)
+            .map_err(db_err)?;
+        SignedPreKeyRecord::deserialize(&raw)
     }
 
     async fn save_signed_pre_key(
@@ -135,7 +148,7 @@ impl SignedPreKeyStore for SqliteSignedPreKeyStore {
         id: SignedPreKeyId,
         record: &SignedPreKeyRecord,
     ) -> Result<()> {
-        let blob = record.serialize()?;
+        let blob = self.db.seal_bytes(&record.serialize()?).map_err(db_err)?;
         self.db
             .with(|c| {
                 c.execute(
@@ -156,7 +169,7 @@ pub struct SqliteKyberPreKeyStore {
 #[async_trait(?Send)]
 impl KyberPreKeyStore for SqliteKyberPreKeyStore {
     async fn get_kyber_pre_key(&self, id: KyberPreKeyId) -> Result<KyberPreKeyRecord> {
-        let blob: Option<Vec<u8>> = self
+        let blob: Option<String> = self
             .db
             .with(|c| {
                 c.query_row(
@@ -167,11 +180,15 @@ impl KyberPreKeyStore for SqliteKyberPreKeyStore {
                 .optional()
             })
             .map_err(db_err)?;
-        KyberPreKeyRecord::deserialize(&blob.ok_or(SignalProtocolError::InvalidKyberPreKeyId)?)
+        let raw = self
+            .db
+            .open_bytes(&blob.ok_or(SignalProtocolError::InvalidKyberPreKeyId)?)
+            .map_err(db_err)?;
+        KyberPreKeyRecord::deserialize(&raw)
     }
 
     async fn save_kyber_pre_key(&mut self, id: KyberPreKeyId, record: &KyberPreKeyRecord) -> Result<()> {
-        let blob = record.serialize()?;
+        let blob = self.db.seal_bytes(&record.serialize()?).map_err(db_err)?;
         self.db
             .with(|c| {
                 c.execute(
@@ -275,12 +292,16 @@ impl IdentityKeyStore for SqliteIdentityStore {
             Some(_) => IdentityChange::ReplacedExisting,
             None => IdentityChange::NewOrUnchanged,
         };
+        let sealed = self
+            .db
+            .seal_bytes(&identity.serialize())
+            .map_err(db_err)?;
         self.db
             .with(|c| {
                 c.execute(
                     "INSERT INTO identities (address, identity) VALUES (?1, ?2)
                      ON CONFLICT(address) DO UPDATE SET identity = excluded.identity",
-                    params![addr_key(address), identity.serialize().to_vec()],
+                    params![addr_key(address), sealed],
                 )
                 .map(|_| ())
             })
@@ -302,7 +323,7 @@ impl IdentityKeyStore for SqliteIdentityStore {
     }
 
     async fn get_identity(&self, address: &ProtocolAddress) -> Result<Option<IdentityKey>> {
-        let blob: Option<Vec<u8>> = self
+        let blob: Option<String> = self
             .db
             .with(|c| {
                 c.query_row(
@@ -313,6 +334,11 @@ impl IdentityKeyStore for SqliteIdentityStore {
                 .optional()
             })
             .map_err(db_err)?;
-        blob.map(|b| IdentityKey::decode(&b)).transpose()
+        blob
+            .map(|b| {
+                let raw = self.db.open_bytes(&b).map_err(db_err)?;
+                IdentityKey::decode(&raw)
+            })
+            .transpose()
     }
 }

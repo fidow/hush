@@ -1,110 +1,113 @@
-# Despliegue de hush-server (Windows, detrás de Apache)
+# Deploying hush-server (Windows, behind Apache)
 
-Contenido de este paquete:
+What this package contains:
 
-| Fichero | Qué es |
+| File | What it is |
 |---|---|
-| `hush-server.exe` | El servidor. Binario único, sin dependencias que instalar. |
-| `hush-server.cmd` | Su configuración: variables de entorno. **Es lo único que hay que editar.** |
-| `install-service.ps1` | Registra el arranque automático y comprueba que responde. Opcional. |
+| `hush-server.exe` | The server. A single binary, nothing to install. |
+| `hush-server.cmd` | Its configuration: environment variables. **This is the only file you need to edit.** |
+| `install-service.ps1` | Registers automatic startup and checks that the server answers. Optional. |
 
 ---
 
-## Qué hace el servidor
+## What the server is
 
-Es un proceso HTTP **sin TLS** que escucha en `127.0.0.1:8080`. Expone una API
-REST bajo `/v1/...`, una página de descarga en `/`, y un endpoint de
-**Server-Sent Events** (`/v1/messages/stream`) que mantiene una conexión HTTP
-abierta indefinidamente por cada usuario conectado.
+An HTTP process **without TLS** listening on `127.0.0.1:8080`. It exposes a
+REST API under `/v1/...`, a download page at `/`, and a **Server-Sent Events**
+endpoint (`/v1/messages/stream`) that holds an HTTP connection open
+indefinitely for every connected user.
 
-Guarda todo en un único fichero SQLite. No necesita base de datos externa,
-runtime ni servicio adicional.
-
----
-
-## Lo que hay que hacer en la máquina
-
-**1. Copiar el paquete** a una carpeta, por ejemplo `C:\hush\`.
-
-**2. Editar `hush-server.cmd`**: la ruta de la base de datos y los datos del
-relay SMTP. Sin SMTP nadie puede verificar su cuenta ni recuperar la
-contraseña, así que es obligatorio que funcione.
-
-**3. Crear la carpeta de datos** que indique `HUSH_DB` y dar permiso de
-escritura a la cuenta que ejecutará el proceso. Ese fichero contiene las
-cuentas y el archivo cifrado: **es lo único que hay que respaldar**.
-
-La ruta del log se define aparte, en `HUSH_LOG_FILE`, y admite cualquier
-ubicación absoluta —otra unidad o un recurso de red— con la carpeta creada
-automáticamente. Rota a diario (`hush.log.2026-08-02`) y se limpia sola: con
-`HUSH_LOG_KEEP_DAYS` (30 por defecto, `0` para no borrar nunca) elimina los
-rotados más antiguos al arrancar y una vez al día. Solo borra ficheros que
-haya generado él, así que es seguro apuntar a una carpeta compartida con
-otros logs. Sin `HUSH_LOG_FILE` el servidor escribe por consola, que como
-tarea programada significa perder el registro.
-
-**4. Arrancarlo al iniciar la máquina** y que se reinicie si muere.
-`install-service.ps1` lo hace con el Programador de tareas; si preferís NSSM o
-cualquier otro sistema, vale igual. No es un servicio de Windows nativo: es un
-ejecutable normal, así que necesita un envoltorio.
-
-**5. No abrir el 8080 en el firewall.** El acceso desde fuera entra por Apache.
+Everything is stored in a single SQLite file. No external database, runtime or
+extra service is needed.
 
 ---
 
-## Lo que necesita del Apache que ya existe
+## What to do on the machine
 
-El virtualhost de `hush.villasante.es` tiene que hacer de proxy inverso hacia
-`http://127.0.0.1:8080`, con estos requisitos:
+**1. Copy the package** into a folder, for example `C:\hush\`.
 
-**Todo el dominio al backend.** No hay rutas que deba servir Apache: la raíz
-`/` la sirve el propio servidor (página de descarga) y el resto es la API.
+**2. Edit `hush-server.cmd`**: the database path and the SMTP relay details.
+Without working SMTP nobody can verify their account or recover a password, so
+it has to work.
 
-**El endpoint `/v1/messages/stream` necesita trato especial.** Es lo único
-delicado del despliegue y si falla la app parece rota:
+**3. Create the data folder** that `HUSH_DB` points at and grant write access
+to the account that will run the process. That file holds the accounts and the
+encrypted archive: **it is the only thing that needs backing up.** If `HUSH_DB`
+is not set the server refuses to start, so it never ends up writing to an
+unexpected location.
 
-- **Sin buffering ni compresión** en esa ruta. Si Apache acumula la respuesta
-  (típicamente por `mod_deflate`), los mensajes no llegan en tiempo real o no
-  llegan.
-- **Timeout largo**, del orden de una hora. Con el valor por defecto Apache
-  corta la conexión al minuto y el cliente entra en un ciclo de reconexión
-  continuo.
+The log path is configured separately, in `HUSH_LOG_FILE`, and accepts any
+absolute location — another drive or a network share — creating the folder if
+needed. It rotates daily (`hush.log.2026-08-02`) and cleans up after itself:
+`HUSH_LOG_KEEP_DAYS` (30 by default, `0` to never delete) removes older rotated
+files at startup and once a day. It only deletes files it generated, so it is
+safe to point at a folder shared with other logs. Without `HUSH_LOG_FILE` the
+server writes to the console, which as a scheduled task means losing the log.
 
-**Reenviar la IP del cliente.** El servidor limita intentos de registro, login
-y verificación por IP. Detrás de un proxy solo ve la de Apache, así que
-necesita `X-Forwarded-For` — que `mod_proxy` ya añade — y que en
-`hush-server.cmd` esté `HUSH_TRUST_PROXY=1` (viene puesto).
+**4. Start it at boot** and restart it if it dies. `install-service.ps1` does
+this with Task Scheduler; NSSM or any other supervisor works just as well. It
+is not a native Windows service — it is a plain executable, so it needs a
+wrapper.
 
-> Esa variable **solo** debe estar activa si de verdad hay un proxy delante.
-> Si el servidor quedara accesible directamente, cualquiera podría falsificar
-> la cabecera y saltarse los límites.
-
-**Permitir cuerpos de petición de unos 20 MB.** Las imágenes viajan dentro del
-mensaje cifrado; el servidor ya rechaza lo que pase de 15 MB por su cuenta.
-
-**Redirigir HTTP a HTTPS.** La app siempre habla por HTTPS.
-
-Opcional pero recomendable: activar en Apache el intercambio de claves híbrido
-post-cuántico (`X25519MLKEM768`) si la versión de OpenSSL lo soporta, para que
-también el transporte lo sea. No es imprescindible — el cifrado de los
-mensajes es independiente del TLS y ya es resistente a lo cuántico.
+**5. Do not open port 8080 on the firewall.** External access comes in through
+Apache.
 
 ---
 
-## Comprobar que funciona
+## What it needs from the existing Apache
 
-Desde la propia máquina, `http://127.0.0.1:8080/` debe devolver la página de
-descarga. Desde fuera, `https://hush.villasante.es/` debe devolver lo mismo.
+The `hush.villasante.es` virtualhost has to reverse-proxy to
+`http://127.0.0.1:8080`, with these requirements:
 
-La prueba que de verdad importa es el stream: abrir
-`https://hush.villasante.es/v1/messages/stream` en un navegador debe quedarse
-**colgado sin devolver nada** (da 401 sin sesión, pero no debe cerrarse ni dar
-error de proxy). Si responde al instante con un error 502 o 504, el proxy no
-está bien configurado para SSE.
+**The whole domain goes to the backend.** There are no paths Apache should
+serve itself: `/` is served by the server (the download page) and everything
+else is the API.
+
+**The `/v1/messages/stream` endpoint needs special treatment.** It is the only
+delicate part of the deployment, and if it is wrong the app looks broken:
+
+- **No buffering and no compression** on that path. If Apache accumulates the
+  response (typically because of `mod_deflate`), messages arrive late or not at
+  all.
+- **A long timeout**, on the order of an hour. With the default value Apache
+  cuts the connection after a minute and the client ends up in a continuous
+  reconnect cycle.
+
+**Forward the client IP.** The server rate-limits registration, login and
+verification attempts per IP. Behind a proxy it only sees Apache's address, so
+it needs `X-Forwarded-For` — which `mod_proxy` already adds — and
+`HUSH_TRUST_PROXY=1` in `hush-server.cmd` (already set).
+
+> That variable must **only** be enabled if there really is a proxy in front.
+> If the server were reachable directly, anyone could forge the header and
+> bypass the limits.
+
+**Allow request bodies of about 20 MB.** Images travel inside the encrypted
+message; the server already rejects anything over 15 MB on its own.
+
+**Redirect HTTP to HTTPS.** The app always talks over HTTPS.
+
+Optional but worthwhile: enable the post-quantum hybrid key exchange
+(`X25519MLKEM768`) in Apache if the OpenSSL version supports it, so the
+transport is post-quantum too. It is not essential — message encryption is
+independent of TLS and is already quantum-resistant.
 
 ---
 
-## Actualizaciones
+## Checking that it works
 
-Parar el proceso, reemplazar `hush-server.exe`, arrancarlo. La base de datos se
-migra sola al arrancar; no hay que borrarla ni ejecutar nada.
+From the machine itself, `http://127.0.0.1:8080/` must return the download
+page. From outside, `https://hush.villasante.es/` must return the same thing.
+
+The test that really matters is the stream: opening
+`https://hush.villasante.es/v1/messages/stream` in a browser must **hang
+without returning anything** (it answers 401 without a session, but it must not
+close or fail with a proxy error). If it responds immediately with a 502 or
+504, the proxy is not configured correctly for SSE.
+
+---
+
+## Updates
+
+Stop the process, replace `hush-server.exe`, start it again. The database
+migrates itself at startup; nothing to delete and nothing to run.

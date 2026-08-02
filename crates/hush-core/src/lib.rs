@@ -9,6 +9,7 @@ pub mod archive;
 pub mod client;
 pub mod db;
 pub mod engine;
+pub mod keystore;
 pub mod store;
 
 pub use api::{ApiClient, ContactEntry, IncomingMessage, RemoteProfile, ServerEvent};

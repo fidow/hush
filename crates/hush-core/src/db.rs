@@ -1,14 +1,16 @@
 //! Local client database (SQLite via rusqlite): identity and protocol state,
 //! account profile, contacts and message history.
 //!
-//! Note: message history is stored in plaintext — it is the local user's own
-//! data on their own device. At-rest encryption (SQLCipher) is future work.
+//! Everything worth stealing — message text, contact names, the identity
+//! private key, the archive recovery key, the session token, and the whole
+//! libsignal store — is sealed with this device's key before it touches the
+//! disk. See [`crate::keystore`].
 
 use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 
 const SCHEMA: &str = r#"
@@ -90,9 +92,58 @@ pub struct Profile {
     pub token: String,
 }
 
+/// Values that must never sit on disk in the clear. `crypto` is excluded on
+/// purpose: it is the marker saying the rest of the file is sealed.
+fn is_sealed_meta(key: &str) -> bool {
+    key != "crypto"
+}
+
 #[derive(Clone)]
 pub struct LocalDb {
     conn: Rc<RefCell<Connection>>,
+    /// Seals message text, contact names, stored keys and tokens. Absent only
+    /// in tests that do not care about storage.
+    key: Option<crate::keystore::DeviceKey>,
+}
+
+impl LocalDb {
+    /// Encrypts a value for storage, or passes it through when this database
+    /// has no device key (tests).
+    pub(crate) fn seal(&self, plaintext: &str) -> Result<String> {
+        match &self.key {
+            Some(key) => key.seal_str(plaintext),
+            None => Ok(plaintext.to_string()),
+        }
+    }
+
+    pub(crate) fn seal_bytes(&self, plaintext: &[u8]) -> Result<String> {
+        match &self.key {
+            Some(key) => key.seal(plaintext),
+            None => Ok(base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                plaintext,
+            )),
+        }
+    }
+
+    /// Decrypts a stored value. Anything that fails to open is returned as-is
+    /// so a half-migrated database still reads.
+    pub(crate) fn unseal(&self, stored: &str) -> String {
+        match &self.key {
+            Some(key) => key.open_str(stored).unwrap_or_else(|_| stored.to_string()),
+            None => stored.to_string(),
+        }
+    }
+
+    pub(crate) fn open_bytes(&self, stored: &str) -> Result<Vec<u8>> {
+        match &self.key {
+            Some(key) => key.open(stored),
+            None => Ok(base64::Engine::decode(
+                &base64::engine::general_purpose::STANDARD,
+                stored,
+            )?),
+        }
+    }
 }
 
 impl LocalDb {
@@ -101,6 +152,9 @@ impl LocalDb {
             std::fs::create_dir_all(dir).context("create data dir")?;
         }
         let conn = Connection::open(path).context("open local db")?;
+        // Overwrite freed pages instead of leaving old plaintext in the slack
+        // space of the file.
+        conn.execute_batch("PRAGMA secure_delete = ON")?;
         conn.execute_batch(SCHEMA)?;
         // Migration for local dbs created before message kinds existed.
         let _ = conn.execute(
@@ -118,17 +172,159 @@ impl LocalDb {
         ] {
             let _ = conn.execute(&format!("ALTER TABLE messages ADD COLUMN {column}"), []);
         }
-        Ok(Self {
+        // An encrypted database whose key file is gone would otherwise get a
+        // brand new key and read back as garbage, so say what happened.
+        let sealed: Option<String> = conn
+            .query_row("SELECT value FROM meta WHERE key = 'crypto'", [], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        if sealed.is_some() && !path.with_extension("key").exists() {
+            bail!(
+                "the local data in {} is encrypted with a device key that is missing ({}). \
+                 Move that folder aside to start over; the history can be restored with the recovery key.",
+                path.display(),
+                path.with_extension("key").display()
+            );
+        }
+
+        let db = Self {
             conn: Rc::new(RefCell::new(conn)),
-        })
+            key: Some(crate::keystore::DeviceKey::load_or_create(path)?),
+        };
+        db.encrypt_existing_rows()?;
+        Ok(db)
     }
 
+    /// In-memory database with no encryption, for tests.
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(SCHEMA)?;
         Ok(Self {
             conn: Rc::new(RefCell::new(conn)),
+            key: None,
         })
+    }
+
+    /// One-off migration of a database written before storage was encrypted.
+    /// Without it the old plaintext rows would simply stay readable. It runs
+    /// inside a transaction: a partially sealed database would be unreadable.
+    fn encrypt_existing_rows(&self) -> Result<()> {
+        if self.meta_get_raw("crypto")?.is_some() {
+            return Ok(());
+        }
+        self.with(|c| c.execute_batch("BEGIN IMMEDIATE"))?;
+        match self.seal_existing_rows() {
+            Ok(()) => {
+                self.with(|c| c.execute_batch("COMMIT"))?;
+                // The updated rows land on new pages; without this the old
+                // plaintext survives in the freed ones.
+                self.with(|c| c.execute_batch("VACUUM"))?;
+                tracing::info!("local storage encrypted with this device's key");
+                Ok(())
+            }
+            Err(e) => {
+                let _ = self.with(|c| c.execute_batch("ROLLBACK"));
+                Err(e.context("encrypt existing local data"))
+            }
+        }
+    }
+
+    fn seal_existing_rows(&self) -> Result<()> {
+        let messages: Vec<(String, String)> = self.with(|c| {
+            c.prepare("SELECT id, text FROM messages")?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect()
+        })?;
+        let contacts: Vec<(String, String)> = self.with(|c| {
+            c.prepare("SELECT username, alias FROM contacts")?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect()
+        })?;
+        let meta: Vec<(String, String)> = self.with(|c| {
+            c.prepare("SELECT key, value FROM meta")?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect()
+        })?;
+        let stores = self.collect_store_rows()?;
+
+        for (id, text) in messages {
+            let sealed = self.seal(&text)?;
+            self.with(|c| {
+                c.execute(
+                    "UPDATE messages SET text = ?1 WHERE id = ?2",
+                    params![sealed, id],
+                )
+                .map(|_| ())
+            })?;
+        }
+        for (username, alias) in contacts {
+            let sealed = self.seal(&alias)?;
+            self.with(|c| {
+                c.execute(
+                    "UPDATE contacts SET alias = ?1 WHERE username = ?2",
+                    params![sealed, username],
+                )
+                .map(|_| ())
+            })?;
+        }
+        for (key, value) in meta {
+            if !is_sealed_meta(&key) {
+                continue;
+            }
+            let sealed = self.seal(&value)?;
+            self.with(|c| {
+                c.execute(
+                    "UPDATE meta SET value = ?1 WHERE key = ?2",
+                    params![sealed, key],
+                )
+                .map(|_| ())
+            })?;
+        }
+        for (table, key_col, value_col, key, blob) in stores {
+            let sealed = self.seal_bytes(&blob)?;
+            self.with(|c| {
+                c.execute(
+                    &format!("UPDATE {table} SET {value_col} = ?1 WHERE {key_col} = ?2"),
+                    params![sealed, key],
+                )
+                .map(|_| ())
+            })?;
+        }
+
+        self.meta_set_raw("crypto", "v1")?;
+        Ok(())
+    }
+
+    /// Rows of the libsignal stores, which hold private key material. They
+    /// were written as raw blobs before storage was encrypted, so they are
+    /// read as bytes here and rewritten sealed.
+    #[allow(clippy::type_complexity)]
+    fn collect_store_rows(
+        &self,
+    ) -> Result<Vec<(&'static str, &'static str, &'static str, rusqlite::types::Value, Vec<u8>)>>
+    {
+        let tables: [(&'static str, &'static str, &'static str); 5] = [
+            ("sessions", "address", "record"),
+            ("identities", "address", "identity"),
+            ("prekeys", "id", "record"),
+            ("signed_prekeys", "id", "record"),
+            ("kyber_prekeys", "id", "record"),
+        ];
+
+        let mut all = Vec::new();
+        for (table, key_col, value_col) in tables {
+            let rows: Vec<(rusqlite::types::Value, Vec<u8>)> = self.with(|c| {
+                c.prepare(&format!("SELECT {key_col}, {value_col} FROM {table}"))?
+                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect()
+            })?;
+            all.extend(
+                rows.into_iter()
+                    .map(|(key, blob)| (table, key_col, value_col, key, blob)),
+            );
+        }
+        Ok(all)
     }
 
     pub(crate) fn with<T>(&self, f: impl FnOnce(&Connection) -> rusqlite::Result<T>) -> Result<T> {
@@ -138,13 +334,30 @@ impl LocalDb {
     // ---- meta ----
 
     pub fn meta_get(&self, key: &str) -> Result<Option<String>> {
+        let stored = self.meta_get_raw(key)?;
+        Ok(match stored {
+            Some(value) if is_sealed_meta(key) => Some(self.unseal(&value)),
+            other => other,
+        })
+    }
+
+    pub fn meta_set(&self, key: &str, value: &str) -> Result<()> {
+        let stored = if is_sealed_meta(key) {
+            self.seal(value)?
+        } else {
+            value.to_string()
+        };
+        self.meta_set_raw(key, &stored)
+    }
+
+    fn meta_get_raw(&self, key: &str) -> Result<Option<String>> {
         self.with(|c| {
             c.query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
                 .optional()
         })
     }
 
-    pub fn meta_set(&self, key: &str, value: &str) -> Result<()> {
+    fn meta_set_raw(&self, key: &str, value: &str) -> Result<()> {
         self.with(|c| {
             c.execute(
                 "INSERT INTO meta (key, value) VALUES (?1, ?2)
@@ -196,6 +409,7 @@ impl LocalDb {
     // ---- contacts ----
 
     pub fn upsert_contact(&self, username: &str, alias: &str, state: &str) -> Result<()> {
+        let alias = self.seal(alias)?;
         self.with(|c| {
             c.execute(
                 "INSERT INTO contacts (username, alias, state) VALUES (?1, ?2, ?3)
@@ -209,9 +423,13 @@ impl LocalDb {
 
     /// Replaces the cached list with the server's, which owns the truth.
     pub fn replace_contacts(&self, contacts: &[(String, String, String)]) -> Result<()> {
+        let sealed: Vec<(String, String, String)> = contacts
+            .iter()
+            .map(|(u, a, s)| Ok((u.clone(), self.seal(a)?, s.clone())))
+            .collect::<Result<_>>()?;
         self.with(|c| {
             c.execute("DELETE FROM contacts", [])?;
-            for (username, alias, state) in contacts {
+            for (username, alias, state) in &sealed {
                 c.execute(
                     "INSERT INTO contacts (username, alias, state) VALUES (?1, ?2, ?3)",
                     params![username, alias, state],
@@ -223,16 +441,28 @@ impl LocalDb {
 
     /// Cached contacts as `(username, alias, state)`.
     pub fn contacts(&self) -> Result<Vec<(String, String, String)>> {
-        self.with(|c| {
+        let rows: Vec<(String, String, String)> = self.with(|c| {
             c.prepare("SELECT username, alias, state FROM contacts ORDER BY username")?
                 .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
                 .collect()
-        })
+        })?;
+        Ok(rows
+            .into_iter()
+            .map(|(u, alias, s)| {
+                let alias = self.unseal(&alias);
+                (u, alias, s)
+            })
+            .collect())
     }
 
     // ---- messages ----
 
     pub fn add_message(&self, m: &StoredMessage) -> Result<()> {
+        let text = self.seal(&m.text)?;
+        let m = &StoredMessage {
+            text,
+            ..m.clone()
+        };
         self.with(|c| {
             c.execute(
                 "INSERT OR IGNORE INTO messages
@@ -256,7 +486,7 @@ impl LocalDb {
 
     /// Every stored message, used to re-upload the archive under a new key.
     pub fn all_messages(&self) -> Result<Vec<StoredMessage>> {
-        self.with(|c| {
+        let rows: Vec<StoredMessage> = self.with(|c| {
             c.prepare(
                 "SELECT id, contact, mine, kind, text, state, delivered_at, read_at, created_at
                  FROM messages
@@ -276,7 +506,8 @@ impl LocalDb {
                 })
             })?
             .collect()
-        })
+        })?;
+        Ok(rows.into_iter().map(|m| self.decrypt_message(m)).collect())
     }
 
     /// Advances the delivery state of one of our messages. States only move
@@ -327,6 +558,12 @@ impl LocalDb {
         })
     }
 
+    /// Turns a row read from disk back into a readable message.
+    fn decrypt_message(&self, mut m: StoredMessage) -> StoredMessage {
+        m.text = self.unseal(&m.text);
+        m
+    }
+
     /// Removes a message from the local history.
     pub fn delete_message(&self, id: &str) -> Result<()> {
         self.with(|c| {
@@ -348,7 +585,7 @@ impl LocalDb {
     }
 
     pub fn history(&self, contact: &str) -> Result<Vec<StoredMessage>> {
-        self.with(|c| {
+        let rows: Vec<StoredMessage> = self.with(|c| {
             c.prepare(
                 "SELECT id, contact, mine, kind, text, state, delivered_at, read_at, created_at
                  FROM messages
@@ -368,7 +605,8 @@ impl LocalDb {
                 })
             })?
             .collect()
-        })
+        })?;
+        Ok(rows.into_iter().map(|m| self.decrypt_message(m)).collect())
     }
 
     /// Next free id for a prekey table (ids grow monotonically).

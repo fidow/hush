@@ -1,8 +1,8 @@
-# Registra hush-server como tarea programada que arranca con la maquina y se
-# reinicia sola si el proceso muere. Se usa el Programador de tareas en vez de
-# sc.exe porque hush-server es un ejecutable normal, no un servicio de Windows.
+# Registers hush-server as a scheduled task that starts with the machine and
+# restarts itself if the process dies. Task Scheduler is used instead of sc.exe
+# because hush-server is a plain executable, not a Windows service.
 #
-# Ejecutar como administrador desde la carpeta del despliegue:
+# Run as administrator from the deployment folder:
 #   powershell -ExecutionPolicy Bypass -File install-service.ps1
 
 #Requires -RunAsAdministrator
@@ -15,30 +15,30 @@ $taskName = "HushServer"
 
 foreach ($required in @($launcher, (Join-Path $root "hush-server.exe"))) {
     if (-not (Test-Path $required)) {
-        throw "Falta $required. Copia todo el paquete de despliegue a la misma carpeta."
+        throw "$required is missing. Copy the whole deployment package into the same folder."
     }
 }
 
-# La carpeta de la base de datos debe existir antes del primer arranque.
+# The database folder has to exist before the first start.
 $dbLine = Select-String -Path $launcher -Pattern '^set HUSH_DB=sqlite://(.+?)\?' | Select-Object -First 1
 if ($dbLine) {
     $dbPath = $dbLine.Matches[0].Groups[1].Value -replace '/', '\'
     $dbDir = Split-Path $dbPath -Parent
     if (-not (Test-Path $dbDir)) {
         New-Item -ItemType Directory -Path $dbDir -Force | Out-Null
-        Write-Host "Creada la carpeta de datos: $dbDir"
+        Write-Host "Created the data folder: $dbDir"
     }
 }
 
 if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
-    Write-Host "La tarea $taskName ya existe; se vuelve a crear."
+    Write-Host "Task $taskName already exists; recreating it."
     Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
 }
 
 $action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c `"$launcher`"" -WorkingDirectory $root
 $trigger = New-ScheduledTaskTrigger -AtStartup
-# SYSTEM para que arranque sin que nadie inicie sesion. Si el relay SMTP o la
-# carpeta de datos exigen otra identidad, cambia el principal por esa cuenta.
+# SYSTEM so it starts without anyone logging in. If the SMTP relay or the data
+# folder require a different identity, change the principal to that account.
 $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
 $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
@@ -50,13 +50,13 @@ $settings = New-ScheduledTaskSettingsSet `
 
 Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger `
     -Principal $principal -Settings $settings `
-    -Description "Hush relay server (HTTP en 127.0.0.1:8080, detras de Apache)" | Out-Null
+    -Description "Hush relay server (HTTP on 127.0.0.1:8080, behind Apache)" | Out-Null
 
 Start-ScheduledTask -TaskName $taskName
 Start-Sleep -Seconds 3
 
-# Comprobacion real de que arranco. Falla en vez de avisar: una tarea
-# registrada que nunca levanta el proceso parece instalada y no lo esta.
+# Actually check that it came up. This fails instead of warning: a registered
+# task that never starts the process looks installed when it is not.
 $listening = $false
 foreach ($attempt in 1..10) {
     Start-Sleep -Seconds 2
@@ -68,15 +68,15 @@ foreach ($attempt in 1..10) {
 }
 
 if ($listening) {
-    Write-Host "Hush server en marcha y respondiendo en 127.0.0.1:8080." -ForegroundColor Green
+    Write-Host "Hush server is running and answering on 127.0.0.1:8080." -ForegroundColor Green
 } else {
     Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
     throw @"
-El servidor no responde en 127.0.0.1:8080; se ha quitado la tarea para no
-dejarla registrada sin funcionar.
+The server is not answering on 127.0.0.1:8080; the task has been removed so it
+is not left registered and broken.
 
-Ejecuta hush-server.cmd a mano en esta carpeta para ver el error. Lo mas
-habitual es una ruta de HUSH_DB o HUSH_LOG_FILE en la que la cuenta del
-servicio no puede escribir, o el puerto 8080 ya ocupado.
+Run hush-server.cmd by hand in this folder to see the error. The usual causes
+are a HUSH_DB or HUSH_LOG_FILE path the service account cannot write to, or
+port 8080 already in use.
 "@
 }
