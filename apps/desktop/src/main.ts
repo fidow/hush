@@ -493,14 +493,112 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
-// Suppress the webview's browser context menu, except on text inputs (where
-// copy/paste is useful). Shift+right-click bypasses it (handy in dev to reach
-// Inspect; devtools don't exist in release builds anyway).
+// ---- Menú contextual propio ----
+// The browser menu is suppressed everywhere except text inputs; the app shows
+// its own menu with actions relevant to what was clicked. Shift+right-click
+// bypasses it (handy in dev to reach Inspect).
+
+interface CtxItem {
+  label: string;
+  action: () => void;
+}
+
+function closeContextMenu() {
+  document.getElementById("ctx-menu")?.remove();
+}
+
+function showContextMenu(items: CtxItem[], x: number, y: number) {
+  closeContextMenu();
+  const menu = document.createElement("div");
+  menu.id = "ctx-menu";
+  menu.className = "ctx-menu";
+  for (const item of items) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = item.label;
+    btn.addEventListener("click", () => {
+      closeContextMenu();
+      item.action();
+    });
+    menu.appendChild(btn);
+  }
+  document.body.appendChild(menu);
+  const rect = menu.getBoundingClientRect();
+  menu.style.left = `${Math.min(x, window.innerWidth - rect.width - 8)}px`;
+  menu.style.top = `${Math.min(y, window.innerHeight - rect.height - 8)}px`;
+}
+
+document.addEventListener("mousedown", (e) => {
+  if (!(e.target as HTMLElement).closest("#ctx-menu")) closeContextMenu();
+});
+
+async function copyImageToClipboard(dataUrl: string) {
+  try {
+    const blob = await (await fetch(dataUrl)).blob();
+    await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
+    toast("Imagen copiada");
+  } catch {
+    toast("No se pudo copiar la imagen");
+  }
+}
+
 document.addEventListener("contextmenu", (e) => {
   if (e.shiftKey) return;
   const t = e.target as HTMLElement;
-  if (!(t instanceof HTMLInputElement) && !(t instanceof HTMLTextAreaElement)) {
-    e.preventDefault();
+  if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement) return;
+  e.preventDefault();
+
+  const bubble = t.closest<HTMLElement>(".bubble");
+  if (bubble) {
+    if (bubble.classList.contains("image")) {
+      const src = bubble.querySelector("img")?.src ?? "";
+      showContextMenu(
+        [
+          { label: "Ver imagen", action: () => openLightbox(src) },
+          { label: "Copiar imagen", action: () => copyImageToClipboard(src) },
+        ],
+        e.clientX,
+        e.clientY,
+      );
+    } else {
+      const text = bubble.textContent ?? "";
+      showContextMenu(
+        [
+          {
+            label: "Copiar texto",
+            action: () => {
+              navigator.clipboard.writeText(text).then(
+                () => toast("Texto copiado"),
+                () => toast("No se pudo copiar"),
+              );
+            },
+          },
+        ],
+        e.clientX,
+        e.clientY,
+      );
+    }
+    return;
+  }
+
+  const contactLi = t.closest<HTMLElement>("#contact-list li");
+  if (contactLi?.dataset.name) {
+    const name = contactLi.dataset.name;
+    showContextMenu(
+      [
+        {
+          label: `Copiar @${name}`,
+          action: () => {
+            navigator.clipboard.writeText(name).then(
+              () => toast("Usuario copiado"),
+              () => toast("No se pudo copiar"),
+            );
+          },
+        },
+      ],
+      e.clientX,
+      e.clientY,
+    );
   }
 });
 

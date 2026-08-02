@@ -432,6 +432,32 @@ button.secondary {
   background: var(--panel-2);
 }
 
+/* ---- Menú contextual ---- */
+.ctx-menu {
+  position: fixed;
+  z-index: 100;
+  background: var(--panel);
+  border: 1px solid #00000060;
+  border-radius: 10px;
+  box-shadow: 0 8px 30px #00000080;
+  padding: 0.3rem;
+  min-width: 11rem;
+  display: flex;
+  flex-direction: column;
+}
+
+.ctx-menu button {
+  background: transparent;
+  text-align: left;
+  padding: 0.45rem 0.7rem;
+  font-size: 0.92rem;
+  border-radius: 7px;
+}
+
+.ctx-menu button:hover {
+  background: var(--panel-2);
+}
+
 /* ---- Toast ---- */
 #toast {
   position: fixed;
