@@ -464,7 +464,9 @@ async fn actor(db_path: PathBuf, mut commands: mpsc::Receiver<Command>) {
                     let _ = reply.send(result.map_err(|e| e.to_string()));
                 }
                 Some(Command::Register { server, username, alias, email, password, reply }) => {
-                    let result = actor.handle_register(&server, &username, &alias, &email, &password).await;
+                    let result = actor
+                        .handle_register(&server, &username.to_lowercase(), &alias, &email, &password)
+                        .await;
                     let _ = reply.send(result.map_err(|e| e.to_string()));
                 }
                 Some(Command::Verify { code, reply }) => {
@@ -472,7 +474,9 @@ async fn actor(db_path: PathBuf, mut commands: mpsc::Receiver<Command>) {
                     let _ = reply.send(result.map_err(|e| e.to_string()));
                 }
                 Some(Command::Login { server, username, password, reply }) => {
-                    let result = actor.handle_login(&server, &username, &password).await;
+                    let result = actor
+                        .handle_login(&server, &username.to_lowercase(), &password)
+                        .await;
                     let _ = reply.send(result.map_err(|e| e.to_string()));
                 }
                 Some(Command::Connect { reply }) => {
@@ -489,10 +493,11 @@ async fn actor(db_path: PathBuf, mut commands: mpsc::Receiver<Command>) {
                     }
                 }
                 Some(Command::Send { recipient, text, reply }) => {
-                    let result = actor.handle_send(&recipient, &text).await;
+                    let result = actor.handle_send(&recipient.to_lowercase(), &text).await;
                     let _ = reply.send(result.map_err(|e| e.to_string()));
                 }
                 Some(Command::AddContact { username, reply }) => {
+                    let username = username.to_lowercase();
                     let result = match actor.session.as_ref() {
                         None => Err("no session".to_string()),
                         Some(s) => match s.api.fetch_profile(&username).await {

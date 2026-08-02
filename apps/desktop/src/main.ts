@@ -1,3 +1,4 @@
+/// <reference types="vite/client" />
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { CATEGORIES, MAX_RECENT, RECENT_KEY } from "./emoji";
@@ -211,12 +212,12 @@ $("#login-form").addEventListener("submit", async (e) => {
   try {
     const devCode = await invoke<string | null>("register", {
       server: ($("#server-input") as HTMLInputElement).value.trim(),
-      username: ($("#username-input") as HTMLInputElement).value.trim(),
+      username: ($("#username-input") as HTMLInputElement).value.trim().toLowerCase(),
       alias: ($("#alias-input") as HTMLInputElement).value.trim(),
       email: ($("#email-input") as HTMLInputElement).value.trim(),
       password: ($("#password-input") as HTMLInputElement).value,
     });
-    me = ($("#username-input") as HTMLInputElement).value.trim();
+    me = ($("#username-input") as HTMLInputElement).value.trim().toLowerCase();
     myAlias = ($("#alias-input") as HTMLInputElement).value.trim() || me;
     show("verify");
     if (devCode) ($("#code-input") as HTMLInputElement).value = devCode;
@@ -257,7 +258,7 @@ $("#signin-form").addEventListener("submit", async (e) => {
   try {
     const profile = await invoke<ProfileInfo>("login", {
       server: ($("#signin-server-input") as HTMLInputElement).value.trim(),
-      username: ($("#signin-username-input") as HTMLInputElement).value.trim(),
+      username: ($("#signin-username-input") as HTMLInputElement).value.trim().toLowerCase(),
       password: ($("#signin-password-input") as HTMLInputElement).value,
     });
     await enterChat(profile);
@@ -273,7 +274,7 @@ $("#signin-form").addEventListener("submit", async (e) => {
 $("#add-contact-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const input = $("#add-contact-input") as HTMLInputElement;
-  const name = input.value.trim();
+  const name = input.value.trim().toLowerCase();
   input.value = "";
   if (!name || name === me) return;
   try {

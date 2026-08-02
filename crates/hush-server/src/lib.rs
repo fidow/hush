@@ -117,13 +117,13 @@ impl FromRequestParts<AppState> for AuthUser {
             .get("authorization")
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "))
-            .ok_or((StatusCode::UNAUTHORIZED, "missing bearer token".into()))?;
+            .ok_or((StatusCode::UNAUTHORIZED, "Sesión no válida".into()))?;
         let row = sqlx::query("SELECT username FROM accounts WHERE token = ? AND verified = 1")
             .bind(token)
             .fetch_optional(&state.db)
             .await
             .map_err(internal)?
-            .ok_or((StatusCode::UNAUTHORIZED, "invalid token".into()))?;
+            .ok_or((StatusCode::UNAUTHORIZED, "Sesión no válida".into()))?;
         Ok(AuthUser {
             username: row.get(0),
         })
@@ -152,20 +152,24 @@ async fn register(
     Json(req): Json<RegisterRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let bad = |msg: &str| (StatusCode::BAD_REQUEST, msg.to_string());
-    if req.username.is_empty()
-        || req.username.len() > 32
-        || !req.username.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    // Usernames are case-insensitive: stored and matched in lowercase.
+    let username = req.username.to_lowercase();
+    if username.is_empty()
+        || username.len() > 32
+        || !username.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
     {
-        return Err(bad("username must be 1-32 chars of [a-zA-Z0-9_]"));
+        return Err(bad(
+            "El nombre de usuario debe tener de 1 a 32 caracteres (letras, números o _)",
+        ));
     }
     if req.alias.len() > 64 {
-        return Err(bad("alias too long (max 64)"));
+        return Err(bad("El alias es demasiado largo (máximo 64 caracteres)"));
     }
     if !req.email.contains('@') || req.email.len() > 254 {
-        return Err(bad("invalid email"));
+        return Err(bad("El email no es válido"));
     }
     if req.password.len() < 8 {
-        return Err(bad("password must be at least 8 chars"));
+        return Err(bad("La contraseña debe tener al menos 8 caracteres"));
     }
 
     let mut salt_bytes = [0u8; 16];
@@ -180,13 +184,16 @@ async fn register(
     let expires = now() + 24 * 60 * 60 * 1000;
 
     let existing = sqlx::query("SELECT verified FROM accounts WHERE username = ?")
-        .bind(&req.username)
+        .bind(&username)
         .fetch_optional(&state.db)
         .await
         .map_err(internal)?;
     match existing {
         Some(row) if row.get::<i64, _>(0) != 0 => {
-            return Err((StatusCode::CONFLICT, "username already taken".into()));
+            return Err((
+                StatusCode::CONFLICT,
+                "Ese nombre de usuario ya está en uso".into(),
+            ));
         }
         Some(_) => {
             // Unverified leftover: allow re-registering (fresh code and keys).
@@ -202,7 +209,7 @@ async fn register(
             .bind(&token)
             .bind(req.registration_id)
             .bind(&req.identity_key)
-            .bind(&req.username)
+            .bind(&username)
             .execute(&state.db)
             .await
             .map_err(internal)?;
@@ -213,7 +220,7 @@ async fn register(
                  verify_expires, token, registration_id, identity_key, created_at)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
-            .bind(&req.username)
+            .bind(&username)
             .bind(&req.alias)
             .bind(&req.email)
             .bind(&password_hash)
@@ -229,10 +236,10 @@ async fn register(
         }
     }
 
-    tracing::info!(username = %req.username, email = %req.email, "cuenta creada, pendiente de verificación");
+    tracing::info!(username = %username, email = %req.email, "cuenta creada, pendiente de verificación");
     match mail::MailConfig::from_env() {
         Some(cfg) => {
-            let (email, username, code) = (req.email.clone(), req.username.clone(), code.clone());
+            let (email, username, code) = (req.email.clone(), username.clone(), code.clone());
             tokio::task::spawn_blocking(move || {
                 match cfg.send_verification(&email, &username, &code) {
                     Ok(()) => tracing::info!(%username, "email de verificación enviado"),
@@ -241,9 +248,9 @@ async fn register(
             });
         }
         None => {
-            tracing::info!(username = %req.username, "SMTP no configurado; el email de verificación no se envió");
+            tracing::info!(username = %username, "SMTP no configurado; el email de verificación no se envió");
             // The code itself only reaches the log in debug mode (HUSH_LOG=debug).
-            tracing::debug!(username = %req.username, "código de verificación (solo dev): {code}");
+            tracing::debug!(username = %username, "código de verificación (solo dev): {code}");
         }
     }
 
@@ -264,32 +271,33 @@ async fn verify_account(
     State(state): State<AppState>,
     Json(req): Json<VerifyRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let username = req.username.to_lowercase();
     let row = sqlx::query(
         "SELECT token, verify_code, verify_expires, verified FROM accounts WHERE username = ?",
     )
-    .bind(&req.username)
+    .bind(&username)
     .fetch_optional(&state.db)
     .await
     .map_err(internal)?
-    .ok_or((StatusCode::NOT_FOUND, "no such user".into()))?;
+    .ok_or((StatusCode::NOT_FOUND, "Ese usuario no existe".to_string()))?;
 
     if row.get::<i64, _>(3) != 0 {
-        return Err((StatusCode::CONFLICT, "account already verified".into()));
+        return Err((StatusCode::CONFLICT, "La cuenta ya estaba verificada".into()));
     }
     let stored_code: Option<String> = row.get(1);
     let expires: Option<i64> = row.get(2);
     let valid = stored_code.as_deref() == Some(req.code.as_str())
         && expires.is_some_and(|e| e > now());
     if !valid {
-        return Err((StatusCode::BAD_REQUEST, "invalid or expired code".into()));
+        return Err((StatusCode::BAD_REQUEST, "Código incorrecto o caducado".into()));
     }
 
     sqlx::query("UPDATE accounts SET verified = 1, verify_code = NULL WHERE username = ?")
-        .bind(&req.username)
+        .bind(&username)
         .execute(&state.db)
         .await
         .map_err(internal)?;
-    tracing::info!(username = %req.username, "cuenta verificada");
+    tracing::info!(username = %username, "cuenta verificada");
     Ok(Json(serde_json::json!({ "token": row.get::<String, _>(0) })))
 }
 
@@ -303,13 +311,19 @@ async fn login(
     State(state): State<AppState>,
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let username = req.username.to_lowercase();
     let row = sqlx::query("SELECT token, password_hash, verified FROM accounts WHERE username = ?")
-        .bind(&req.username)
+        .bind(&username)
         .fetch_optional(&state.db)
         .await
         .map_err(internal)?;
     // Same error for unknown user and wrong password: don't leak which usernames exist.
-    let denied = || (StatusCode::UNAUTHORIZED, "invalid credentials".into());
+    let denied = || {
+        (
+            StatusCode::UNAUTHORIZED,
+            "Usuario o contraseña incorrectos".to_string(),
+        )
+    };
     let row = row.ok_or_else(denied)?;
     let hash_str: String = row.get(1);
     let parsed = PasswordHash::new(&hash_str).map_err(internal)?;
@@ -317,9 +331,12 @@ async fn login(
         .verify_password(req.password.as_bytes(), &parsed)
         .map_err(|_| denied())?;
     if row.get::<i64, _>(2) == 0 {
-        return Err((StatusCode::FORBIDDEN, "account not verified".into()));
+        return Err((
+            StatusCode::FORBIDDEN,
+            "La cuenta no está verificada; revisa tu email".into(),
+        ));
     }
-    tracing::info!(username = %req.username, "login correcto");
+    tracing::info!(username = %username, "login correcto");
     Ok(Json(serde_json::json!({ "token": row.get::<String, _>(0) })))
 }
 
@@ -328,6 +345,7 @@ async fn get_profile(
     State(state): State<AppState>,
     Path(username): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let username = username.to_lowercase();
     let row = sqlx::query(
         "SELECT alias, identity_key FROM accounts WHERE username = ? AND verified = 1",
     )
@@ -335,7 +353,7 @@ async fn get_profile(
     .fetch_optional(&state.db)
     .await
     .map_err(internal)?
-    .ok_or((StatusCode::NOT_FOUND, "no such user".into()))?;
+    .ok_or((StatusCode::NOT_FOUND, "Ese usuario no existe".into()))?;
     Ok(Json(serde_json::json!({
         "username": username,
         "alias": row.get::<String, _>(0),
@@ -431,6 +449,7 @@ async fn fetch_bundle(
     State(state): State<AppState>,
     Path(username): Path<String>,
 ) -> Result<Json<BundleResponse>, ApiError> {
+    let username = username.to_lowercase();
     let row = sqlx::query(
         "SELECT registration_id, identity_key, bundle_static FROM accounts WHERE username = ?",
     )
@@ -438,11 +457,14 @@ async fn fetch_bundle(
     .fetch_optional(&state.db)
     .await
     .map_err(internal)?
-    .ok_or((StatusCode::NOT_FOUND, "no such user".into()))?;
+    .ok_or((StatusCode::NOT_FOUND, "Ese usuario no existe".into()))?;
 
     let bundle_static: Option<String> = row.get(2);
     let bundle_static = bundle_static
-        .ok_or((StatusCode::NOT_FOUND, "user has not uploaded keys".into()))?;
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            "Ese usuario aún no puede recibir mensajes".into(),
+        ))?;
 
     Ok(Json(BundleResponse {
         registration_id: row.get(0),
@@ -470,13 +492,14 @@ async fn send_message(
     Path(recipient): Path<String>,
     Json(req): Json<SendMessageRequest>,
 ) -> Result<Json<SendMessageResponse>, ApiError> {
+    let recipient = recipient.to_lowercase();
     let exists = sqlx::query("SELECT 1 FROM accounts WHERE username = ?")
         .bind(&recipient)
         .fetch_optional(&state.db)
         .await
         .map_err(internal)?;
     if exists.is_none() {
-        return Err((StatusCode::NOT_FOUND, "no such user".into()));
+        return Err((StatusCode::NOT_FOUND, "Ese usuario no existe".into()));
     }
 
     let msg = OutMessage {

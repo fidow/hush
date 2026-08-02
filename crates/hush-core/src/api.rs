@@ -51,13 +51,30 @@ impl ApiClient {
         Ok(req.bearer_auth(token))
     }
 
+    /// Turns error responses into user-presentable messages: the server's own
+    /// message for 4xx, a generic one for 5xx. No HTTP jargon reaches the UI.
     async fn check(res: reqwest::Response) -> Result<reqwest::Response> {
-        if !res.status().is_success() {
-            let status = res.status();
-            let body = res.text().await.unwrap_or_default();
-            bail!("server returned {status}: {body}");
+        let status = res.status();
+        if status.is_success() {
+            return Ok(res);
         }
-        Ok(res)
+        if status.is_server_error() {
+            let body = res.text().await.unwrap_or_default();
+            tracing::error!("server error {status}: {body}");
+            bail!("Error del servidor, inténtalo de nuevo");
+        }
+        let body = res.text().await.unwrap_or_default();
+        if body.is_empty() {
+            bail!("La petición fue rechazada");
+        }
+        bail!(body);
+    }
+
+    /// Maps transport-level failures (server down, DNS, timeout) to a
+    /// user-presentable message.
+    fn conn_err(e: reqwest::Error) -> anyhow::Error {
+        tracing::warn!("connection error: {e}");
+        anyhow::anyhow!("No se pudo conectar con el servidor")
     }
 
     /// Creates the account (pending email verification). Returns the dev
@@ -84,7 +101,8 @@ impl ApiClient {
                 "identity_key": identity_key_b64,
             }))
             .send()
-            .await?;
+            .await
+            .map_err(Self::conn_err)?;
         let body: Value = Self::check(res).await?.json().await?;
         Ok(body["dev_code"].as_str().map(str::to_string))
     }
@@ -96,7 +114,8 @@ impl ApiClient {
             .post(format!("{}/v1/accounts/verify", self.base))
             .json(&json!({ "username": username, "code": code }))
             .send()
-            .await?;
+            .await
+            .map_err(Self::conn_err)?;
         let body: Value = Self::check(res).await?.json().await?;
         self.token = Some(
             body["token"]
@@ -114,7 +133,8 @@ impl ApiClient {
             .post(format!("{}/v1/sessions", self.base))
             .json(&json!({ "username": username, "password": password }))
             .send()
-            .await?;
+            .await
+            .map_err(Self::conn_err)?;
         let body: Value = Self::check(res).await?.json().await?;
         self.token = Some(
             body["token"]
@@ -131,7 +151,7 @@ impl ApiClient {
             self.http
                 .get(format!("{}/v1/profile/{username}", self.base)),
         )?;
-        let body: Value = Self::check(req.send().await?).await?.json().await?;
+        let body: Value = Self::check(req.send().await.map_err(Self::conn_err)?).await?.json().await?;
         Ok(RemoteProfile {
             alias: body["alias"].as_str().unwrap_or_default().to_string(),
             identity_key: body["identity_key"].as_str().unwrap_or_default().to_string(),
@@ -140,13 +160,13 @@ impl ApiClient {
 
     pub async fn upload_keys(&self, body: &Value) -> Result<()> {
         let req = self.auth(self.http.put(format!("{}/v1/keys", self.base)))?;
-        Self::check(req.json(body).send().await?).await?;
+        Self::check(req.json(body).send().await.map_err(Self::conn_err)?).await?;
         Ok(())
     }
 
     pub async fn fetch_bundle(&self, username: &str) -> Result<Value> {
         let req = self.auth(self.http.get(format!("{}/v1/keys/{username}", self.base)))?;
-        Ok(Self::check(req.send().await?).await?.json().await?)
+        Ok(Self::check(req.send().await.map_err(Self::conn_err)?).await?.json().await?)
     }
 
     /// Sends an encrypted envelope; returns the server-assigned message id.
@@ -155,7 +175,7 @@ impl ApiClient {
             self.http
                 .put(format!("{}/v1/messages/{recipient}", self.base)),
         )?;
-        let body: Value = Self::check(req.json(&json!({ "body": envelope })).send().await?)
+        let body: Value = Self::check(req.json(&json!({ "body": envelope })).send().await.map_err(Self::conn_err)?)
             .await?
             .json()
             .await?;
@@ -164,7 +184,7 @@ impl ApiClient {
 
     pub async fn ack_message(&self, id: &str) -> Result<()> {
         let req = self.auth(self.http.delete(format!("{}/v1/messages/{id}", self.base)))?;
-        Self::check(req.send().await?).await?;
+        Self::check(req.send().await.map_err(Self::conn_err)?).await?;
         Ok(())
     }
 
@@ -175,7 +195,7 @@ impl ApiClient {
             self.http
                 .get(format!("{}/v1/messages/stream", self.base)),
         )?;
-        let res = Self::check(req.send().await?).await?;
+        let res = Self::check(req.send().await.map_err(Self::conn_err)?).await?;
         let (tx, rx) = mpsc::channel(256);
         tokio::spawn(async move {
             let mut stream = res.bytes_stream();
