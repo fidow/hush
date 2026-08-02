@@ -241,7 +241,9 @@ async fn register(
             });
         }
         None => {
-            tracing::info!(username = %req.username, "SMTP no configurado; código de verificación: {code}");
+            tracing::info!(username = %req.username, "SMTP no configurado; el email de verificación no se envió");
+            // The code itself only reaches the log in debug mode (HUSH_LOG=debug).
+            tracing::debug!(username = %req.username, "código de verificación (solo dev): {code}");
         }
     }
 
