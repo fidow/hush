@@ -54,9 +54,12 @@ CREATE TABLE IF NOT EXISTS messages (
     mine       INTEGER NOT NULL,
     kind       TEXT NOT NULL DEFAULT 'text',
     text       TEXT NOT NULL,
-    -- For our own messages: 'sent', 'delivered' or 'read'.
-    state      TEXT NOT NULL DEFAULT 'sent',
-    created_at INTEGER NOT NULL
+    -- For our own messages: 'sent', 'delivered' or 'read', with the instant
+    -- each step was reported.
+    state        TEXT NOT NULL DEFAULT 'sent',
+    delivered_at INTEGER,
+    read_at      INTEGER,
+    created_at   INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_messages_contact ON messages(contact, created_at);
 "#;
@@ -72,6 +75,9 @@ pub struct StoredMessage {
     pub text: String,
     /// Delivery state of our own messages: "sent", "delivered" or "read".
     pub state: String,
+    /// When each step was reported, for the message info panel.
+    pub delivered_at: Option<i64>,
+    pub read_at: Option<i64>,
     pub created_at: i64,
 }
 
@@ -105,10 +111,13 @@ impl LocalDb {
             "ALTER TABLE contacts ADD COLUMN state TEXT NOT NULL DEFAULT 'accepted'",
             [],
         );
-        let _ = conn.execute(
-            "ALTER TABLE messages ADD COLUMN state TEXT NOT NULL DEFAULT 'sent'",
-            [],
-        );
+        for column in [
+            "state TEXT NOT NULL DEFAULT 'sent'",
+            "delivered_at INTEGER",
+            "read_at INTEGER",
+        ] {
+            let _ = conn.execute(&format!("ALTER TABLE messages ADD COLUMN {column}"), []);
+        }
         Ok(Self {
             conn: Rc::new(RefCell::new(conn)),
         })
@@ -226,9 +235,20 @@ impl LocalDb {
     pub fn add_message(&self, m: &StoredMessage) -> Result<()> {
         self.with(|c| {
             c.execute(
-                "INSERT OR IGNORE INTO messages (id, contact, mine, kind, text, state, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![m.id, m.contact, m.mine as i64, m.kind, m.text, m.state, m.created_at],
+                "INSERT OR IGNORE INTO messages
+                 (id, contact, mine, kind, text, state, delivered_at, read_at, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    m.id,
+                    m.contact,
+                    m.mine as i64,
+                    m.kind,
+                    m.text,
+                    m.state,
+                    m.delivered_at,
+                    m.read_at,
+                    m.created_at
+                ],
             )
             .map(|_| ())
         })
@@ -238,7 +258,8 @@ impl LocalDb {
     pub fn all_messages(&self) -> Result<Vec<StoredMessage>> {
         self.with(|c| {
             c.prepare(
-                "SELECT id, contact, mine, kind, text, state, created_at FROM messages
+                "SELECT id, contact, mine, kind, text, state, delivered_at, read_at, created_at
+                 FROM messages
                  ORDER BY created_at",
             )?
             .query_map([], |r| {
@@ -249,7 +270,9 @@ impl LocalDb {
                     kind: r.get(3)?,
                     text: r.get(4)?,
                     state: r.get(5)?,
-                    created_at: r.get(6)?,
+                    delivered_at: r.get(6)?,
+                    read_at: r.get(7)?,
+                    created_at: r.get(8)?,
                 })
             })?
             .collect()
@@ -258,7 +281,7 @@ impl LocalDb {
 
     /// Advances the delivery state of one of our messages. States only move
     /// forward, so a late "delivered" cannot undo a "read".
-    pub fn set_message_state(&self, id: &str, state: &str) -> Result<()> {
+    pub fn set_message_state(&self, id: &str, state: &str, at: Option<i64>) -> Result<()> {
         let rank = |s: &str| match s {
             "read" => 2,
             "delivered" => 1,
@@ -271,9 +294,22 @@ impl LocalDb {
             if current.is_some_and(|c| rank(&c) >= rank(state)) {
                 return Ok(());
             }
+            // Reaching "read" implies delivery, even if that notice was lost.
+            let column = match state {
+                "read" => "read_at",
+                "delivered" => "delivered_at",
+                _ => {
+                    return c
+                        .execute("UPDATE messages SET state = ?1 WHERE id = ?2", params![state, id])
+                        .map(|_| ())
+                }
+            };
             c.execute(
-                "UPDATE messages SET state = ?1 WHERE id = ?2",
-                params![state, id],
+                &format!(
+                    "UPDATE messages SET state = ?1, {column} = COALESCE(?2, {column}),
+                     delivered_at = COALESCE(delivered_at, ?2) WHERE id = ?3"
+                ),
+                params![state, at, id],
             )
             .map(|_| ())
         })
@@ -294,7 +330,8 @@ impl LocalDb {
     pub fn history(&self, contact: &str) -> Result<Vec<StoredMessage>> {
         self.with(|c| {
             c.prepare(
-                "SELECT id, contact, mine, kind, text, state, created_at FROM messages
+                "SELECT id, contact, mine, kind, text, state, delivered_at, read_at, created_at
+                 FROM messages
                  WHERE contact = ?1 ORDER BY created_at",
             )?
             .query_map([contact], |r| {
@@ -305,7 +342,9 @@ impl LocalDb {
                     kind: r.get(3)?,
                     text: r.get(4)?,
                     state: r.get(5)?,
-                    created_at: r.get(6)?,
+                    delivered_at: r.get(6)?,
+                    read_at: r.get(7)?,
+                    created_at: r.get(8)?,
                 })
             })?
             .collect()

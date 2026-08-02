@@ -35,6 +35,10 @@ pub struct ArchiveEntry {
     pub text: String,
     #[serde(default = "default_state")]
     pub state: String,
+    #[serde(default)]
+    pub delivered_at: Option<i64>,
+    #[serde(default)]
+    pub read_at: Option<i64>,
     pub created_at: i64,
 }
 
@@ -52,6 +56,8 @@ impl From<&StoredMessage> for ArchiveEntry {
             kind: m.kind.clone(),
             text: m.text.clone(),
             state: m.state.clone(),
+            delivered_at: m.delivered_at,
+            read_at: m.read_at,
             created_at: m.created_at,
         }
     }
@@ -66,6 +72,8 @@ impl From<ArchiveEntry> for StoredMessage {
             kind: e.kind,
             text: e.text,
             state: e.state,
+            delivered_at: e.delivered_at,
+            read_at: e.read_at,
             created_at: e.created_at,
         }
     }
@@ -169,6 +177,8 @@ mod tests {
             kind: "text".into(),
             text: "hola bob".into(),
             state: "sent".into(),
+            delivered_at: None,
+            read_at: None,
             created_at: 1234,
         }
     }

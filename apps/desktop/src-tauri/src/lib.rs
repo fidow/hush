@@ -147,10 +147,10 @@ async fn connect(
                 ClientEvent::ContactsChanged => {
                     let _ = app.emit("hush://contacts", ());
                 }
-                ClientEvent::Receipt { id, state } => {
+                ClientEvent::Receipt { id, state, at } => {
                     let _ = app.emit(
                         "hush://receipt",
-                        serde_json::json!({ "id": id, "state": state }),
+                        serde_json::json!({ "id": id, "state": state, "at": at }),
                     );
                 }
             }

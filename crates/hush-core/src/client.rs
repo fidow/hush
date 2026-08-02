@@ -21,7 +21,7 @@ pub enum ClientEvent {
     /// The contact list changed (a request arrived, was accepted, …).
     ContactsChanged,
     /// One of our messages was delivered or read.
-    Receipt { id: String, state: String },
+    Receipt { id: String, state: String, at: i64 },
 }
 
 /// A decrypted incoming message, ready for display.
@@ -676,6 +676,8 @@ impl Actor {
             text: content.to_string(),
             // It reached the server; the recipient's device confirms later.
             state: "sent".to_string(),
+            delivered_at: None,
+            read_at: None,
             created_at: now_ms(),
         };
         self.db.add_message(&stored)?;
@@ -692,7 +694,7 @@ impl Actor {
             // A failed receipt is not worth failing the read for; the message
             // is marked locally either way so we don't retry forever.
             let _ = session.api.mark_read(&id).await;
-            let _ = self.db.set_message_state(&id, "read");
+            let _ = self.db.set_message_state(&id, "read", Some(now_ms()));
         }
         Ok(())
     }
@@ -749,6 +751,8 @@ impl Actor {
                     // Incoming messages become "read" when the user opens the
                     // conversation; until then this tracks what we owe.
                     state: "delivered".to_string(),
+                    delivered_at: Some(now_ms()),
+                    read_at: None,
                     text,
                     created_at: msg.created_at,
                 };
@@ -971,10 +975,10 @@ async fn actor(db_path: PathBuf, mut commands: mpsc::Receiver<Command>) {
                             let _ = events.send(ClientEvent::ContactsChanged).await;
                         }
                     }
-                    Some(ServerEvent::Receipt { id, state }) => {
-                        let _ = actor.db.set_message_state(&id, &state);
+                    Some(ServerEvent::Receipt { id, state, at }) => {
+                        let _ = actor.db.set_message_state(&id, &state, Some(at));
                         if let Some(events) = &actor.events {
-                            let _ = events.send(ClientEvent::Receipt { id, state }).await;
+                            let _ = events.send(ClientEvent::Receipt { id, state, at }).await;
                         }
                     }
                     None => {

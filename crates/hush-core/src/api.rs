@@ -36,7 +36,7 @@ pub enum ServerEvent {
     Message(IncomingMessage),
     ContactsChanged,
     /// A message we sent was delivered to, or read by, its recipient.
-    Receipt { id: String, state: String },
+    Receipt { id: String, state: String, at: i64 },
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -399,6 +399,7 @@ impl ApiClient {
                                 Some(ServerEvent::Receipt {
                                     id: v["id"].as_str()?.to_string(),
                                     state: v["state"].as_str()?.to_string(),
+                                    at: v["at"].as_i64().unwrap_or_default(),
                                 })
                             }),
                         ("message", Some(data)) => serde_json::from_str::<IncomingMessage>(data)

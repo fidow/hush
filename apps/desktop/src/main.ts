@@ -1,6 +1,7 @@
 /// <reference types="vite/client" />
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { CATEGORIES, MAX_RECENT, RECENT_KEY } from "./emoji";
 import { applyTranslations, LANGUAGES, lang, setLang, t, tError, type Lang } from "./i18n";
 import {
@@ -19,6 +20,8 @@ interface Message {
   text: string;
   /// Para los mensajes propios: "sent", "delivered" o "read".
   state: string;
+  delivered_at: number | null;
+  read_at: number | null;
   created_at: number;
   mine: boolean;
 }
@@ -30,6 +33,8 @@ interface StoredMessage {
   kind: string;
   text: string;
   state: string;
+  delivered_at: number | null;
+  read_at: number | null;
   created_at: number;
 }
 
@@ -72,6 +77,28 @@ const PRESENCE_POLL_MS = 60_000;
 const contacts = new Map<string, Contact>();
 /// Contacts with messages arrived while their chat was not open.
 const unread = new Set<string>();
+
+/// Whether the app window has the user's attention. `document.hasFocus()` is
+/// unreliable inside the webview, so track the real window state instead.
+let windowFocused = true;
+
+/// True when the user can actually see `name`'s conversation right now.
+function isWatching(name: string): boolean {
+  return windowFocused && current === name;
+}
+
+/// Reports the conversation as read; safe to call when there is nothing to do.
+function reportRead(name: string) {
+  void invoke("mark_read", { contact: name }).catch(() => {});
+}
+
+getCurrentWindow()
+  .onFocusChanged(({ payload: focused }) => {
+    windowFocused = focused;
+    // Coming back to an open conversation counts as reading it.
+    if (focused && current) reportRead(current);
+  })
+  .catch(() => {});
 let me = "";
 let myAlias = "";
 let myStatus = "online";
@@ -298,6 +325,8 @@ async function selectContact(name: string) {
         kind: m.kind,
         text: m.text,
         state: m.state,
+        delivered_at: m.delivered_at,
+        read_at: m.read_at,
         created_at: m.created_at,
         mine: m.mine,
       }));
@@ -312,7 +341,7 @@ async function selectContact(name: string) {
   }
   renderMessages();
   // Opening the conversation is what "read" means.
-  void invoke("mark_read", { contact: name }).catch(() => {});
+  reportRead(name);
   $("#send-input").focus();
 }
 
@@ -323,6 +352,7 @@ function renderMessages() {
   for (const msg of contacts.get(current)?.messages ?? []) {
     const div = document.createElement("div");
     div.className = `bubble ${msg.mine ? "mine" : "theirs"}`;
+    div.dataset.id = msg.id;
     if (msg.kind === "image") {
       const img = document.createElement("img");
       img.src = msg.text;
@@ -868,6 +898,8 @@ $("#send-form").addEventListener("submit", async (e) => {
       kind: stored.kind,
       text: stored.text,
       state: stored.state,
+      delivered_at: stored.delivered_at,
+      read_at: stored.read_at,
       created_at: stored.created_at,
       mine: true,
     });
@@ -880,14 +912,18 @@ $("#send-form").addEventListener("submit", async (e) => {
 listen<{ id: string; sender: string; kind: string; text: string; created_at: number }>(
   "hush://message",
   ({ payload }) => {
-    addMessage(payload.sender, { ...payload, state: "delivered", mine: false });
-    // Reading it right away if that chat is open on screen.
-    if (document.hasFocus() && current === payload.sender) {
-      void invoke("mark_read", { contact: payload.sender }).catch(() => {});
-    }
-    // Don't interrupt someone already reading that very conversation.
-    const watching = document.hasFocus() && current === payload.sender;
-    if (!watching) {
+    addMessage(payload.sender, {
+      ...payload,
+      state: "delivered",
+      delivered_at: Date.now(),
+      read_at: null,
+      mine: false,
+    });
+    // Reading it right away if that chat is open on screen; otherwise alert,
+    // since the user is not looking at it.
+    if (isWatching(payload.sender)) {
+      reportRead(payload.sender);
+    } else {
       const who = contactLabel(payload.sender);
       const preview =
         payload.kind === "image" ? t("notify.image") : payload.text.slice(0, 120);
@@ -896,14 +932,20 @@ listen<{ id: string; sender: string; kind: string; text: string; created_at: num
   },
 );
 
-listen<{ id: string; state: string }>("hush://receipt", ({ payload }) => {
+listen<{ id: string; state: string; at: number }>("hush://receipt", ({ payload }) => {
   for (const contact of contacts.values()) {
     const msg = contact.messages.find((m) => m.id === payload.id);
-    if (msg) {
-      msg.state = payload.state;
-      renderMessages();
-      break;
+    if (!msg) continue;
+    msg.state = payload.state;
+    if (payload.state === "read") {
+      msg.read_at = payload.at;
+      // A read message was obviously delivered, even if that notice was lost.
+      msg.delivered_at ??= payload.at;
+    } else {
+      msg.delivered_at = payload.at;
     }
+    renderMessages();
+    break;
   }
 });
 
@@ -971,6 +1013,8 @@ $("#img-send").addEventListener("click", async () => {
       kind: stored.kind,
       text: stored.text,
       state: stored.state,
+      delivered_at: stored.delivered_at,
+      read_at: stored.read_at,
       created_at: stored.created_at,
       mine: true,
     });
@@ -1069,6 +1113,50 @@ $("#emoji-btn").addEventListener("click", () => {
 
 // ---- Visor de imágenes ----
 
+// ---- Información de un mensaje ----
+
+function formatMoment(timestamp: number | null | undefined): string {
+  if (!timestamp) return "—";
+  return new Date(timestamp).toLocaleString(lang(), {
+    dateStyle: "medium",
+    timeStyle: "short",
+  });
+}
+
+function showMessageInfo(id: string) {
+  const msg = current
+    ? contacts.get(current)?.messages.find((m) => m.id === id)
+    : undefined;
+  if (!msg) return;
+
+  const body = $("#info-body");
+  body.replaceChildren();
+  // Receipts only exist for what we sent; for received messages the useful
+  // facts are when it was sent and when it got here.
+  const rows: [string, string][] = msg.mine
+    ? [
+        ["info.sent", formatMoment(msg.created_at)],
+        ["info.delivered", formatMoment(msg.delivered_at)],
+        ["info.read", formatMoment(msg.read_at)],
+      ]
+    : [
+        ["info.sentBy", contactLabel(msg.sender)],
+        ["info.received", formatMoment(msg.created_at)],
+      ];
+  for (const [key, value] of rows) {
+    const term = document.createElement("dt");
+    term.textContent = t(key);
+    const def = document.createElement("dd");
+    def.textContent = value;
+    body.append(term, def);
+  }
+  $("#msg-info").classList.remove("hidden");
+}
+
+$("#info-close").addEventListener("click", () =>
+  $("#msg-info").classList.add("hidden"),
+);
+
 function openLightbox(src: string) {
   ($("#img-lightbox-img") as HTMLImageElement).src = src;
   $("#img-lightbox").classList.remove("hidden");
@@ -1083,6 +1171,7 @@ document.addEventListener("keydown", (e) => {
     hideEmojiPanel();
     $("#img-lightbox").classList.add("hidden");
     $("#settings").classList.add("hidden");
+    $("#msg-info").classList.add("hidden");
   }
 });
 
@@ -1199,24 +1288,18 @@ document.addEventListener("contextmenu", (e) => {
 
   const bubble = target.closest<HTMLElement>(".bubble");
   if (bubble) {
-    if (bubble.classList.contains("image")) {
-      const src = bubble.querySelector("img")?.src ?? "";
-      showContextMenu(
-        [
-          { label: t("ctx.view"), action: () => openLightbox(src) },
-          { label: t("ctx.copyImage"), action: () => copyImageToClipboard(src) },
-        ],
-        e.clientX,
-        e.clientY,
-      );
-    } else {
-      const text = bubble.textContent ?? "";
-      showContextMenu(
-        [{ label: t("ctx.copyText"), action: () => copyText(text) }],
-        e.clientX,
-        e.clientY,
-      );
-    }
+    const id = bubble.dataset.id ?? "";
+    const items: CtxItem[] = bubble.classList.contains("image")
+      ? [
+          { label: t("ctx.view"), action: () => openLightbox(bubble.querySelector("img")!.src) },
+          {
+            label: t("ctx.copyImage"),
+            action: () => copyImageToClipboard(bubble.querySelector("img")!.src),
+          },
+        ]
+      : [{ label: t("ctx.copyText"), action: () => copyText(bubble.textContent ?? "") }];
+    items.push({ label: t("ctx.info"), action: () => showMessageInfo(id) });
+    showContextMenu(items, e.clientX, e.clientY);
     return;
   }
 

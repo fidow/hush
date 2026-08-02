@@ -132,7 +132,11 @@ enum Push {
     /// The contact list changed; the client should re-fetch it.
     ContactsChanged,
     /// A message we sent reached the recipient's device, or was read.
-    Receipt { id: String, state: &'static str },
+    Receipt {
+        id: String,
+        state: &'static str,
+        at: i64,
+    },
 }
 
 /// A live SSE listener. The id lets a stream remove *its own* entry on
@@ -1420,8 +1424,8 @@ async fn message_stream(
                 .event("message")
                 .data(serde_json::to_string(&msg).expect("OutMessage serializes")),
             Push::ContactsChanged => Event::default().event("contacts").data("{}"),
-            Push::Receipt { id, state } => Event::default().event("receipt").data(
-                serde_json::json!({ "id": id, "state": state }).to_string(),
+            Push::Receipt { id, state, at } => Event::default().event("receipt").data(
+                serde_json::json!({ "id": id, "state": state, "at": at }).to_string(),
             ),
         })
     });
@@ -1492,6 +1496,7 @@ async fn mark_read(
         let _ = listener.tx.try_send(Push::Receipt {
             id: id.clone(),
             state: "read",
+            at: now(),
         });
     }
     tracing::debug!(user = %auth.username, id = %id, "mensaje leído");
@@ -1627,6 +1632,7 @@ async fn ack_message(
             let _ = listener.tx.try_send(Push::Receipt {
                 id: id.clone(),
                 state: "delivered",
+                at: now_ms,
             });
         }
     }

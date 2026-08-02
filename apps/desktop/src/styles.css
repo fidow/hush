@@ -592,6 +592,26 @@ label.toggle input {
   gap: 0.5rem;
 }
 
+.info-card {
+  width: 22rem;
+}
+
+.info-list {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.5rem 1rem;
+  font-size: 0.9rem;
+}
+
+.info-list dt {
+  color: var(--muted);
+}
+
+.info-list dd {
+  text-align: right;
+  user-select: text;
+}
+
 .recovery-row {
   display: flex;
   gap: 0.5rem;
