@@ -53,22 +53,42 @@ impl MailConfig {
 
     /// Blocking; call from `spawn_blocking`.
     pub fn send_verification(&self, to: &str, username: &str, code: &str) -> anyhow::Result<()> {
+        self.send(
+            to,
+            "Your Hush verification code",
+            &format!(
+                "Hi {username},\n\n\
+                 Your code to confirm the account is: {code}\n\n\
+                 It expires in 24 hours. If you did not create this account, ignore this message.\n"
+            ),
+        )
+    }
+
+    /// Blocking; call from `spawn_blocking`.
+    pub fn send_password_reset(&self, to: &str, username: &str, code: &str) -> anyhow::Result<()> {
+        self.send(
+            to,
+            "Reset your Hush password",
+            &format!(
+                "Hi {username},\n\n\
+                 Your password reset code is: {code}\n\n\
+                 It expires in 1 hour. If you did not ask for this, ignore this message —\n\
+                 your password stays unchanged.\n\n\
+                 Note: this does not affect your recovery key, which is what restores your\n\
+                 message history on a new device.\n"
+            ),
+        )
+    }
+
+    fn send(&self, to: &str, subject: &str, body: &str) -> anyhow::Result<()> {
         let email = Message::builder()
             .from(self.from.parse()?)
             .to(to.parse()?)
-            .subject("Tu código de verificación de Hush")
+            .subject(subject)
             .header(ContentType::TEXT_PLAIN)
-            .body(format!(
-                "Hola {username},\n\n\
-                 Tu código para confirmar la cuenta es: {code}\n\n\
-                 El código caduca en 24 horas. Si no has creado esta cuenta, ignora este mensaje.\n"
-            ))?;
+            .body(body.to_string())?;
 
-        tracing::info!(
-            "enviando email de verificación a {to} vía {}:{}",
-            self.host,
-            self.port
-        );
+        tracing::info!("enviando email a {to} vía {}:{}", self.host, self.port);
         let mut builder = if self.starttls {
             SmtpTransport::starttls_relay(&self.host)?
         } else {

@@ -58,6 +58,9 @@ CREATE TABLE IF NOT EXISTS accounts (
     -- from the live SSE connections, not from this column.
     status          TEXT NOT NULL DEFAULT 'online',
     verify_attempts INTEGER NOT NULL DEFAULT 0,
+    reset_code      TEXT,
+    reset_expires   INTEGER,
+    reset_attempts  INTEGER NOT NULL DEFAULT 0,
     token           TEXT NOT NULL UNIQUE,
     registration_id INTEGER NOT NULL,
     identity_key    TEXT NOT NULL,
@@ -144,6 +147,16 @@ pub async fn connect_db(url: &str) -> anyhow::Result<SqlitePool> {
     let _ = sqlx::query("ALTER TABLE accounts ADD COLUMN status TEXT NOT NULL DEFAULT 'online'")
         .execute(&pool)
         .await;
+    // Password recovery, added later: migrate rather than recreate.
+    for column in [
+        "reset_code TEXT",
+        "reset_expires INTEGER",
+        "reset_attempts INTEGER NOT NULL DEFAULT 0",
+    ] {
+        let _ = sqlx::query(&format!("ALTER TABLE accounts ADD COLUMN {column}"))
+            .execute(&pool)
+            .await;
+    }
     Ok(pool)
 }
 
@@ -158,6 +171,8 @@ pub fn app(db: SqlitePool) -> Router {
         .route("/v1/accounts", post(register))
         .route("/v1/accounts/verify", post(verify_account))
         .route("/v1/sessions", post(login))
+        .route("/v1/password/forgot", post(forgot_password))
+        .route("/v1/password/reset", post(reset_password))
         .route("/v1/profile/{username}", get(get_profile))
         .route("/v1/me", axum::routing::patch(update_me))
         .route("/v1/presence", post(query_presence))
@@ -633,6 +648,168 @@ async fn login(
     state.limits.reset(&format!("login:{username}"));
     tracing::info!(username = %username, "login correcto");
     Ok(Json(serde_json::json!({ "token": row.get::<String, _>(0) })))
+}
+
+#[derive(Deserialize)]
+struct ForgotRequest {
+    username: String,
+}
+
+/// Emails a reset code. Always answers 200: telling the caller whether an
+/// account exists would turn this into a username oracle.
+async fn forgot_password(
+    State(state): State<AppState>,
+    ClientIp(ip): ClientIp,
+    Json(req): Json<ForgotRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let username = req.username.to_lowercase();
+    let now_ms = now();
+    if !state
+        .limits
+        .allow(&format!("forgot:{username}"), 3, HOUR, now_ms)
+        || !state.limits.allow(&format!("forgot-ip:{ip}"), 10, HOUR, now_ms)
+    {
+        return Err(too_many());
+    }
+
+    let row = sqlx::query("SELECT email FROM accounts WHERE username = ? AND verified = 1")
+        .bind(&username)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(internal)?;
+    let Some(row) = row else {
+        tracing::info!(%username, "recuperación de contraseña para cuenta inexistente");
+        return Ok(Json(serde_json::json!({ "status": "sent" })));
+    };
+
+    let code = format!("{:06}", rand::rng().random_range(0..1_000_000u32));
+    sqlx::query(
+        "UPDATE accounts SET reset_code = ?, reset_expires = ?, reset_attempts = 0
+         WHERE username = ?",
+    )
+    .bind(&code)
+    .bind(now_ms + 60 * 60 * 1000)
+    .bind(&username)
+    .execute(&state.db)
+    .await
+    .map_err(internal)?;
+
+    let email: String = row.get(0);
+    tracing::info!(%username, "código de recuperación de contraseña generado");
+    match mail::MailConfig::from_env() {
+        Some(cfg) => {
+            let (email, username, code) = (email, username.clone(), code.clone());
+            tokio::task::spawn_blocking(move || {
+                match cfg.send_password_reset(&email, &username, &code) {
+                    Ok(()) => tracing::info!(%username, "email de recuperación enviado"),
+                    Err(e) => tracing::error!(%username, "fallo enviando email de recuperación: {e}"),
+                }
+            });
+        }
+        None => {
+            tracing::debug!(%username, "código de recuperación (solo dev): {code}");
+        }
+    }
+
+    let mut resp = serde_json::json!({ "status": "sent" });
+    if std::env::var("HUSH_ECHO_CODE").is_ok_and(|v| v == "1") && mail::MailConfig::from_env().is_none()
+    {
+        resp["dev_code"] = code.into();
+    }
+    Ok(Json(resp))
+}
+
+#[derive(Deserialize)]
+struct ResetRequest {
+    username: String,
+    code: String,
+    password: String,
+}
+
+/// Sets a new password from a reset code and rotates the session token, so a
+/// reset also evicts whoever might have had the old password.
+async fn reset_password(
+    State(state): State<AppState>,
+    ClientIp(ip): ClientIp,
+    Json(req): Json<ResetRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let username = req.username.to_lowercase();
+    let now_ms = now();
+    if !state
+        .limits
+        .allow(&format!("reset:{username}"), 5, QUARTER_HOUR, now_ms)
+        || !state.limits.allow(&format!("reset-ip:{ip}"), 20, QUARTER_HOUR, now_ms)
+    {
+        return Err(too_many());
+    }
+    if req.password.len() < 8 {
+        return Err(bad_request(
+            "weak_password",
+            "Password must be at least 8 characters",
+        ));
+    }
+    if req.password.len() > 1024 {
+        return Err(bad_request("password_too_long", "Password is too long"));
+    }
+
+    let row = sqlx::query(
+        "SELECT reset_code, reset_expires, reset_attempts FROM accounts WHERE username = ?",
+    )
+    .bind(&username)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(internal)?
+    .ok_or_else(|| bad_request("invalid_code", "Incorrect or expired code"))?;
+
+    let stored: Option<String> = row.get(0);
+    let expires: Option<i64> = row.get(1);
+    let attempts: i64 = row.get(2);
+    let bad_code = || bad_request("invalid_code", "Incorrect or expired code");
+    if attempts >= MAX_VERIFY_ATTEMPTS {
+        return Err(bad_code());
+    }
+    let valid = stored
+        .as_deref()
+        .is_some_and(|s| constant_time_eq(s, &req.code))
+        && expires.is_some_and(|e| e > now_ms);
+    if !valid {
+        let spent = attempts + 1;
+        sqlx::query(
+            "UPDATE accounts SET reset_attempts = ?,
+             reset_code = CASE WHEN ? THEN NULL ELSE reset_code END WHERE username = ?",
+        )
+        .bind(spent)
+        .bind(spent >= MAX_VERIFY_ATTEMPTS)
+        .bind(&username)
+        .execute(&state.db)
+        .await
+        .map_err(internal)?;
+        return Err(bad_code());
+    }
+
+    let mut salt_bytes = [0u8; 16];
+    rand::rng().fill_bytes(&mut salt_bytes);
+    let salt = SaltString::encode_b64(&salt_bytes).map_err(internal)?;
+    let password_hash = Argon2::default()
+        .hash_password(req.password.as_bytes(), &salt)
+        .map_err(internal)?
+        .to_string();
+    let token = new_token();
+
+    sqlx::query(
+        "UPDATE accounts SET password_hash = ?, token = ?, reset_code = NULL,
+         reset_expires = NULL, reset_attempts = 0 WHERE username = ?",
+    )
+    .bind(&password_hash)
+    .bind(&token)
+    .bind(&username)
+    .execute(&state.db)
+    .await
+    .map_err(internal)?;
+
+    state.limits.reset(&format!("login:{username}"));
+    tracing::info!(%username, "contraseña restablecida");
+    Ok(Json(serde_json::json!({ "status": "reset" })))
 }
 
 async fn get_profile(

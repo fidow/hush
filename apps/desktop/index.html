@@ -36,6 +36,7 @@
           </label>
           <button type="submit" id="signin-btn" data-i18n="auth.signin"></button>
           <p id="signin-error" class="error"></p>
+          <button type="button" id="to-forgot" class="switch-link" data-i18n="auth.forgot"></button>
           <p class="hint" data-i18n="auth.signin.note"></p>
           <button type="button" id="to-register" class="switch-link" data-i18n="auth.toRegister"></button>
         </form>
@@ -73,6 +74,39 @@
           <select id="lang-input"></select>
         </label>
       </div>
+    </section>
+
+    <!-- Recuperar contraseña -->
+    <section id="forgot" class="screen hidden">
+      <form id="forgot-form" class="login-card">
+        <h1>🔑</h1>
+        <p class="tagline" data-i18n="forgot.note"></p>
+        <label>
+          <span data-i18n="auth.server"></span>
+          <select id="forgot-server-input" required></select>
+          <span id="forgot-server-url" class="field-note"></span>
+        </label>
+        <label>
+          <span data-i18n="auth.username"></span>
+          <input id="forgot-username-input" pattern="[A-Za-z0-9_]{1,32}" required />
+        </label>
+
+        <div id="forgot-step2" class="auth-form hidden">
+          <label>
+            <span data-i18n="forgot.code"></span>
+            <input id="forgot-code-input" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" placeholder="000000" />
+          </label>
+          <label>
+            <span data-i18n="forgot.newPassword"></span>
+            <input id="forgot-password-input" type="password" minlength="8" data-i18n-placeholder="auth.password.placeholder" />
+          </label>
+        </div>
+
+        <button type="submit" id="forgot-btn" data-i18n="forgot.send"></button>
+        <p id="forgot-error" class="error"></p>
+        <p class="hint" data-i18n="forgot.keyNote"></p>
+        <button type="button" id="forgot-back" class="switch-link" data-i18n="forgot.back"></button>
+      </form>
     </section>
 
     <!-- Verificación por email -->

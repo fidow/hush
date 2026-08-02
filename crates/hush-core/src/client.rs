@@ -82,6 +82,18 @@ enum Command {
         password: String,
         reply: oneshot::Sender<Result<ProfileInfo, String>>,
     },
+    ForgotPassword {
+        server: String,
+        username: String,
+        reply: oneshot::Sender<Result<Option<String>, String>>,
+    },
+    ResetPassword {
+        server: String,
+        username: String,
+        code: String,
+        password: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     /// The recovery key held by this device, shown to the user on request.
     RecoveryCode {
         reply: oneshot::Sender<Result<String, String>>,
@@ -219,6 +231,45 @@ impl HushClient {
         self.request(|reply| Command::Login {
             server,
             username,
+            password,
+            reply,
+        })
+        .await
+    }
+
+    /// Requests a password reset code by email.
+    pub async fn forgot_password(
+        &self,
+        server: &str,
+        username: &str,
+    ) -> Result<Option<String>, String> {
+        let (server, username) = (server.to_string(), username.to_string());
+        self.request(|reply| Command::ForgotPassword {
+            server,
+            username,
+            reply,
+        })
+        .await
+    }
+
+    /// Sets a new password using the emailed code.
+    pub async fn reset_password(
+        &self,
+        server: &str,
+        username: &str,
+        code: &str,
+        password: &str,
+    ) -> Result<(), String> {
+        let (server, username, code, password) = (
+            server.to_string(),
+            username.to_string(),
+            code.to_string(),
+            password.to_string(),
+        );
+        self.request(|reply| Command::ResetPassword {
+            server,
+            username,
+            code,
             password,
             reply,
         })
@@ -756,6 +807,23 @@ async fn actor(db_path: PathBuf, mut commands: mpsc::Receiver<Command>) {
                         .handle_login(&server, &username.to_lowercase(), &password)
                         .await;
                     let _ = reply.send(result.map_err(|e| e.to_string()));
+                }
+                Some(Command::ForgotPassword { server, username, reply }) => {
+                    // No session needed: this runs before signing in.
+                    let api = ApiClient::new(server.trim_end_matches('/'));
+                    let result = api
+                        .forgot_password(&username.to_lowercase())
+                        .await
+                        .map_err(|e| e.to_string());
+                    let _ = reply.send(result);
+                }
+                Some(Command::ResetPassword { server, username, code, password, reply }) => {
+                    let api = ApiClient::new(server.trim_end_matches('/'));
+                    let result = api
+                        .reset_password(&username.to_lowercase(), &code, &password)
+                        .await
+                        .map_err(|e| e.to_string());
+                    let _ = reply.send(result);
                 }
                 Some(Command::RecoveryCode { reply }) => {
                     let result = actor

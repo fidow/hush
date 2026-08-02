@@ -29,6 +29,18 @@ const STRINGS: Record<Lang, Record<string, string>> = {
       "En un dispositivo nuevo se generan claves de cifrado nuevas. Para traerte el historial, entra y usa tu clave de recuperación desde Ajustes.",
     "auth.signin": "Entrar",
     "auth.register": "Crear cuenta",
+    "auth.forgot": "¿Has olvidado tu contraseña?",
+    "forgot.note":
+      "Te enviaremos un código a tu email para que puedas elegir una contraseña nueva.",
+    "forgot.code": "Código recibido por email",
+    "forgot.newPassword": "Contraseña nueva",
+    "forgot.send": "Enviar código",
+    "forgot.reset": "Cambiar contraseña",
+    "forgot.sent": "Si la cuenta existe, recibirás un código por email",
+    "forgot.done": "Contraseña cambiada, ya puedes entrar",
+    "forgot.back": "Volver",
+    "forgot.keyNote":
+      "Cambiar la contraseña no afecta a tu clave de recuperación: esa es la que restaura el historial en otro dispositivo. Se cerrará la sesión en todos tus dispositivos.",
     "auth.toRegister": "¿No tienes cuenta? Crear una",
     "auth.toSignin": "¿Ya tienes cuenta? Entrar",
 
@@ -173,6 +185,17 @@ const STRINGS: Record<Lang, Record<string, string>> = {
       "A new device generates new encryption keys. To bring your history along, sign in and use your recovery key from Settings.",
     "auth.signin": "Sign in",
     "auth.register": "Create account",
+    "auth.forgot": "Forgot your password?",
+    "forgot.note": "We'll email you a code so you can choose a new password.",
+    "forgot.code": "Code from your email",
+    "forgot.newPassword": "New password",
+    "forgot.send": "Send code",
+    "forgot.reset": "Change password",
+    "forgot.sent": "If the account exists, a code is on its way to your email",
+    "forgot.done": "Password changed, you can sign in now",
+    "forgot.back": "Back",
+    "forgot.keyNote":
+      "Changing your password does not affect your recovery key: that is what restores your history on another device. You will be signed out on all your devices.",
     "auth.toRegister": "No account yet? Create one",
     "auth.toSignin": "Already have an account? Sign in",
 

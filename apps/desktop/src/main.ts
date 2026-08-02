@@ -71,8 +71,8 @@ function toast(text: string) {
   setTimeout(() => el.classList.add("hidden"), 4000);
 }
 
-function show(screen: "boot" | "login" | "verify" | "chat") {
-  for (const s of ["boot", "login", "verify", "chat"]) {
+function show(screen: "boot" | "login" | "verify" | "chat" | "forgot") {
+  for (const s of ["boot", "login", "verify", "chat", "forgot"]) {
     $(`#${s}`).classList.toggle("hidden", s !== screen);
   }
 }
@@ -360,6 +360,7 @@ function populateServers() {
   for (const [selectId, urlId] of [
     ["#server-input", "#server-url"],
     ["#signin-server-input", "#signin-server-url"],
+    ["#forgot-server-input", "#forgot-server-url"],
   ]) {
     const select = $(selectId) as HTMLSelectElement;
     select.replaceChildren();
@@ -560,6 +561,63 @@ function setAuthMode(register: boolean) {
 
 $("#to-register").addEventListener("click", () => setAuthMode(true));
 $("#to-signin").addEventListener("click", () => setAuthMode(false));
+
+// ---- Recuperar contraseña ----
+
+/// False while asking for the code, true once it has been sent.
+let resetCodeSent = false;
+
+$("#to-forgot").addEventListener("click", () => {
+  resetCodeSent = false;
+  $("#forgot-step2").classList.add("hidden");
+  $("#forgot-btn").textContent = t("forgot.send");
+  $("#forgot-error").textContent = "";
+  ($("#forgot-server-input") as HTMLSelectElement).value = (
+    $("#signin-server-input") as HTMLSelectElement
+  ).value;
+  ($("#forgot-server-input") as HTMLSelectElement).dispatchEvent(new Event("change"));
+  ($("#forgot-username-input") as HTMLInputElement).value = (
+    $("#signin-username-input") as HTMLInputElement
+  ).value;
+  show("forgot");
+  $("#forgot-username-input").focus();
+});
+
+$("#forgot-back").addEventListener("click", () => show("login"));
+
+$("#forgot-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const btn = $("#forgot-btn") as HTMLButtonElement;
+  const server = ($("#forgot-server-input") as HTMLSelectElement).value;
+  const username = ($("#forgot-username-input") as HTMLInputElement).value.trim().toLowerCase();
+  if (!username) return;
+  btn.disabled = true;
+  $("#forgot-error").textContent = "";
+  try {
+    if (!resetCodeSent) {
+      const devCode = await invoke<string | null>("forgot_password", { server, username });
+      resetCodeSent = true;
+      $("#forgot-step2").classList.remove("hidden");
+      btn.textContent = t("forgot.reset");
+      if (devCode) ($("#forgot-code-input") as HTMLInputElement).value = devCode;
+      $("#forgot-code-input").focus();
+      toast(t("forgot.sent"));
+    } else {
+      const code = ($("#forgot-code-input") as HTMLInputElement).value.trim();
+      const password = ($("#forgot-password-input") as HTMLInputElement).value;
+      await invoke("reset_password", { server, username, code, password });
+      // Prefill the sign-in form with the new credentials.
+      ($("#signin-username-input") as HTMLInputElement).value = username;
+      ($("#signin-password-input") as HTMLInputElement).value = password;
+      show("login");
+      toast(t("forgot.done"));
+    }
+  } catch (err) {
+    $("#forgot-error").textContent = tError(err);
+  } finally {
+    btn.disabled = false;
+  }
+});
 
 $("#login-form").addEventListener("submit", async (e) => {
   e.preventDefault();

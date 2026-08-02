@@ -46,6 +46,30 @@ async fn login(
     client.login(&server, &username, &password).await
 }
 
+/// Asks the server to email a password reset code.
+#[tauri::command]
+async fn forgot_password(
+    client: State<'_, HushClient>,
+    server: String,
+    username: String,
+) -> Result<Option<String>, String> {
+    client.forgot_password(&server, &username).await
+}
+
+/// Sets a new password from the emailed code.
+#[tauri::command]
+async fn reset_password(
+    client: State<'_, HushClient>,
+    server: String,
+    username: String,
+    code: String,
+    password: String,
+) -> Result<(), String> {
+    client
+        .reset_password(&server, &username, &code, &password)
+        .await
+}
+
 /// The recovery key of this device, for the user to copy and keep.
 #[tauri::command]
 async fn get_recovery_code(client: State<'_, HushClient>) -> Result<String, String> {
@@ -195,7 +219,9 @@ pub fn run() {
             get_history,
             update_me,
             get_recovery_code,
-            restore_history
+            restore_history,
+            forgot_password,
+            reset_password
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

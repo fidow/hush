@@ -276,6 +276,93 @@ async fn errors_do_not_leak_internals() {
     }
 }
 
+/// A forgotten password can be reset by email, without the endpoint becoming
+/// a username oracle or a guessing game.
+#[tokio::test]
+async fn password_can_be_reset_by_email() {
+    let (base, pool) = spawn_server().await;
+    let client = reqwest::Client::new();
+    let old_token = register(&client, &base, &pool, "alice", "Alicia").await;
+
+    // Unknown accounts get the same answer as real ones.
+    for username in ["alice", "ghost"] {
+        let res = client
+            .post(format!("{base}/v1/password/forgot"))
+            .json(&json!({ "username": username }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200, "{username} should not be distinguishable");
+    }
+
+    let code: String = sqlx::query("SELECT reset_code FROM accounts WHERE username = 'alice'")
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+        .get(0);
+
+    // A wrong code is refused, and so is a weak new password.
+    let res = client
+        .post(format!("{base}/v1/password/reset"))
+        .json(&json!({ "username": "alice", "code": "000000", "password": "otracontraseña" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 400);
+    let res = client
+        .post(format!("{base}/v1/password/reset"))
+        .json(&json!({ "username": "alice", "code": code, "password": "corta" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 400);
+
+    // The real code sets the new password.
+    let res = client
+        .post(format!("{base}/v1/password/reset"))
+        .json(&json!({ "username": "alice", "code": code, "password": "otracontraseña" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+
+    // Old password no longer works, new one does.
+    let res = client
+        .post(format!("{base}/v1/sessions"))
+        .json(&json!({ "username": "alice", "password": "supersecreta" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 401);
+    let res = client
+        .post(format!("{base}/v1/sessions"))
+        .json(&json!({ "username": "alice", "password": "otracontraseña" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    let new_token = res.json::<Value>().await.unwrap()["token"].as_str().unwrap().to_string();
+
+    // The session token rotated, so anyone holding the old one is evicted.
+    assert_ne!(new_token, old_token);
+    let res = client
+        .get(format!("{base}/v1/contacts"))
+        .bearer_auth(&old_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 401);
+
+    // The code is single-use.
+    let res = client
+        .post(format!("{base}/v1/password/reset"))
+        .json(&json!({ "username": "alice", "code": code, "password": "terceracontraseña" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 400);
+}
+
 /// Contact requests gate messaging: strangers are refused, and a link only
 /// forms once the other side accepts.
 #[tokio::test]

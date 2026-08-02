@@ -281,6 +281,33 @@ impl ApiClient {
         Ok(())
     }
 
+    /// Asks the server to email a password reset code. Succeeds even for
+    /// unknown accounts, by design. Returns the dev code when echoed.
+    pub async fn forgot_password(&self, username: &str) -> Result<Option<String>> {
+        let res = self
+            .http
+            .post(format!("{}/v1/password/forgot", self.base))
+            .json(&json!({ "username": username }))
+            .send()
+            .await
+            .map_err(Self::conn_err)?;
+        let body: Value = Self::check(res).await?.json().await?;
+        Ok(body["dev_code"].as_str().map(str::to_string))
+    }
+
+    /// Sets a new password from an emailed reset code.
+    pub async fn reset_password(&self, username: &str, code: &str, password: &str) -> Result<()> {
+        let res = self
+            .http
+            .post(format!("{}/v1/password/reset", self.base))
+            .json(&json!({ "username": username, "code": code, "password": password }))
+            .send()
+            .await
+            .map_err(Self::conn_err)?;
+        Self::check(res).await?;
+        Ok(())
+    }
+
     /// The caller's contact list, including pending requests.
     pub async fn list_contacts(&self) -> Result<Vec<ContactEntry>> {
         let req = self.auth(self.http.get(format!("{}/v1/contacts", self.base)))?;
