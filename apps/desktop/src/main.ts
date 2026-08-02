@@ -65,9 +65,11 @@ interface Contact {
 
 /// Servers users can pick from, each with a friendly name. Add new
 /// deployments here and both the sign-in and register forms pick them up.
+/// The local one is a development convenience and is left out of packaged
+/// builds, where it would only offer a connection that cannot work.
 const SERVERS: { name: string; url: string }[] = [
-  { name: "Local", url: "http://127.0.0.1:8080" },
   { name: "Main Hush", url: "https://hush.villasante.es" },
+  ...(import.meta.env.DEV ? [{ name: "Local", url: "http://127.0.0.1:8080" }] : []),
 ];
 
 const SETTABLE_STATUSES = ["online", "away", "busy"] as const;
