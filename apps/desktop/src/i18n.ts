@@ -197,6 +197,22 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "settings.close": "Close",
     "settings.saved": "Settings saved",
 
+    "recovery.title": "Recovery key",
+    "recovery.note":
+      "Keep it somewhere safe. It is the only thing that can restore your history on another device, and nobody else holds it: not even the server.",
+    "recovery.show": "Show",
+    "recovery.hide": "Hide",
+    "recovery.copy": "Copy",
+    "recovery.copied": "Recovery key copied",
+
+    "restore.title": "Restore history",
+    "restore.note":
+      "Paste the recovery key from another device to bring its conversations here.",
+    "restore.placeholder": "XXXX-XXXX-XXXX-…",
+    "restore.action": "Restore",
+    "restore.done": "History restored: {n} messages",
+    "restore.empty": "There was no history to restore",
+
     "image.preview": "Image to send",
     "image.send": "Send image",
     "image.cancel": "Cancel",
@@ -248,6 +264,9 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "err.request_failed": "The request was rejected",
     "err.connection_failed": "Could not reach the server",
     "err.no_session": "You are not signed in",
+    "err.wrong_recovery_key": "That recovery key does not belong to this account",
+    "err.invalid_recovery_key": "That recovery key is not in a valid format",
+    "err.no_recovery_key": "This device has no recovery key yet",
   },
 };
 

@@ -499,6 +499,12 @@ button.secondary {
   justify-content: flex-end;
 }
 
+.settings-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
 .recovery-row {
   display: flex;
   gap: 0.5rem;
@@ -513,15 +519,23 @@ button.secondary {
 }
 
 .recovery-code {
-  flex: 1;
-  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
   background: var(--panel-2);
+  border: 1px solid #ffffff14;
   border-radius: 8px;
-  padding: 0.55rem 0.7rem;
+  padding: 0.7rem;
   font-family: ui-monospace, Consolas, monospace;
-  font-size: 0.78rem;
+  font-size: 0.92rem;
+  letter-spacing: 0.04em;
+  line-height: 1.5;
   overflow-wrap: anywhere;
   user-select: text;
+  /* Reserve the room the full key needs so revealing it does not resize
+     the dialog. */
+  min-height: 4.6rem;
 }
 
 .icon-btn {

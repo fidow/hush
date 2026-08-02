@@ -338,7 +338,7 @@ $("#settings-btn").addEventListener("click", () => {
   ($("#settings-lang") as HTMLSelectElement).value = lang();
   $("#settings-error").textContent = "";
   // The key is only revealed on demand, never just by opening settings.
-  $("#recovery-code").textContent = "••••";
+  $("#recovery-code").textContent = HIDDEN_KEY;
   $("#recovery-show").textContent = t("recovery.show");
   recoveryShown = false;
   $("#settings").classList.remove("hidden");
@@ -350,6 +350,7 @@ $("#settings-close").addEventListener("click", () =>
 
 // ---- Clave de recuperación ----
 
+const HIDDEN_KEY = "••••••••••••••••";
 let recoveryShown = false;
 
 async function recoveryCode(): Promise<string> {
@@ -359,7 +360,7 @@ async function recoveryCode(): Promise<string> {
 $("#recovery-show").addEventListener("click", async () => {
   const label = $("#recovery-code");
   if (recoveryShown) {
-    label.textContent = "••••";
+    label.textContent = HIDDEN_KEY;
     $("#recovery-show").textContent = t("recovery.show");
     recoveryShown = false;
     return;

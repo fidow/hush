@@ -123,7 +123,10 @@
     <!-- Ajustes -->
     <div id="settings" class="overlay hidden">
       <form id="settings-form" class="settings-card">
-        <h2 data-i18n="settings.title"></h2>
+        <header class="settings-header">
+          <h2 data-i18n="settings.title"></h2>
+          <button type="button" id="settings-close" class="icon-btn" data-i18n-title="settings.close">✕</button>
+        </header>
         <label>
           <span data-i18n="settings.alias"></span>
           <input id="settings-alias" maxlength="64" required />
@@ -136,18 +139,12 @@
           <span data-i18n="settings.language"></span>
           <select id="settings-lang"></select>
         </label>
-        <p id="settings-error" class="error"></p>
-        <div class="settings-actions">
-          <button type="button" id="settings-close" class="secondary" data-i18n="settings.close"></button>
-          <button type="submit" id="settings-save" data-i18n="settings.save"></button>
-        </div>
-
         <hr />
 
         <h3 data-i18n="recovery.title"></h3>
         <p class="hint" data-i18n="recovery.note"></p>
+        <code id="recovery-code" class="recovery-code">••••••••••••••••</code>
         <div class="recovery-row">
-          <code id="recovery-code" class="recovery-code">••••</code>
           <button type="button" id="recovery-show" class="secondary" data-i18n="recovery.show"></button>
           <button type="button" id="recovery-copy" class="secondary" data-i18n="recovery.copy"></button>
         </div>
@@ -157,6 +154,11 @@
         <div class="recovery-row">
           <input id="restore-input" data-i18n-placeholder="restore.placeholder" />
           <button type="button" id="restore-btn" data-i18n="restore.action"></button>
+        </div>
+
+        <p id="settings-error" class="error"></p>
+        <div class="settings-actions">
+          <button type="submit" id="settings-save" data-i18n="settings.save"></button>
         </div>
       </form>
     </div>
