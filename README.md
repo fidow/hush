@@ -84,15 +84,30 @@ email before they can log in or exchange messages.
 
 Private keys can never travel through the server, so a new device starts with
 fresh keys and no history. To avoid losing conversations, each device
-re-encrypts every message it sends or receives under a key derived from the
-user's **history passphrase** (Argon2id → XChaCha20-Poly1305) and uploads the
-result. Signing in elsewhere and entering that passphrase restores the full
-history; the server only ever stores opaque blobs. Both primitives are
-symmetric, so this layer is quantum-resistant on its own.
+re-encrypts every message it sends or receives under the account's **recovery
+key** (Argon2id → XChaCha20-Poly1305) and uploads the result. Signing in
+elsewhere and entering that key restores the full history; the server only ever
+stores opaque blobs. Both primitives are symmetric, so this layer is
+quantum-resistant on its own.
 
-The passphrase is deliberately separate from the login password, which the
-server does see during authentication. Losing it means losing the archive —
-there is no recovery path by design.
+The recovery key is generated for the account, shown once at sign-up and
+available again from settings. It is deliberately separate from the login
+password, which the server does see during authentication. Losing it means
+losing the archive — there is no recovery path by design.
+
+### Local storage
+
+The client database is not a place where plaintext survives either: message
+text, contact names, the identity private key, the recovery key, the session
+token and the whole libsignal store are sealed with XChaCha20-Poly1305 before
+being written. The key is generated per device, kept beside the database and
+wrapped by the operating system — DPAPI on Windows, bound to the user account —
+so the files on their own are useless on another machine or to another user.
+
+Databases created before this migrate on first open, in a transaction followed
+by a `VACUUM` so the old plaintext does not linger in freed pages. What this
+does not defend against is code already running as that user: it can ask the OS
+to unwrap the key exactly as the app does.
 
 ## License
 
