@@ -50,12 +50,19 @@ impl MailConfig {
                  El código caduca en 24 horas. Si no has creado esta cuenta, ignora este mensaje.\n"
             ))?;
 
+        tracing::info!(
+            "enviando email de verificación a {to} vía {}:{}",
+            self.host,
+            self.port
+        );
         let mut builder = if self.starttls {
             SmtpTransport::starttls_relay(&self.host)?
         } else {
             SmtpTransport::builder_dangerous(&self.host)
         }
-        .port(self.port);
+        .port(self.port)
+        // Fail fast so problems show up in the log within seconds.
+        .timeout(Some(std::time::Duration::from_secs(10)));
         if let (Some(user), Some(pass)) = (&self.user, &self.pass) {
             builder = builder.credentials(Credentials::new(user.clone(), pass.clone()));
         }

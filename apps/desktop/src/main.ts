@@ -406,4 +406,15 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") hideEmojiPanel();
 });
 
+// In production, suppress the webview's browser context menu (Inspect etc. only
+// exist in debug builds anyway, but the copy/reload web menu also feels off).
+if (import.meta.env.PROD) {
+  document.addEventListener("contextmenu", (e) => {
+    const t = e.target as HTMLElement;
+    if (!(t instanceof HTMLInputElement) && !(t instanceof HTMLTextAreaElement)) {
+      e.preventDefault();
+    }
+  });
+}
+
 boot();
