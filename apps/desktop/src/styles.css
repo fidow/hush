@@ -380,6 +380,18 @@ button:disabled {
   max-height: 20rem;
   border-radius: 10px;
   display: block;
+  cursor: zoom-in;
+}
+
+#img-lightbox {
+  cursor: zoom-out;
+}
+
+#img-lightbox img {
+  max-width: 94vw;
+  max-height: 94vh;
+  border-radius: 8px;
+  object-fit: contain;
 }
 
 .overlay {

@@ -145,6 +145,8 @@ function renderMessages() {
       const img = document.createElement("img");
       img.src = msg.text;
       img.alt = "Imagen";
+      img.title = "Clic para ampliar";
+      img.addEventListener("click", () => openLightbox(msg.text));
       div.classList.add("image");
       div.appendChild(img);
     } else {
@@ -473,19 +475,33 @@ $("#emoji-btn").addEventListener("click", () => {
   }
 });
 
-document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") hideEmojiPanel();
+// ---- Visor de imágenes ----
+
+function openLightbox(src: string) {
+  ($("#img-lightbox-img") as HTMLImageElement).src = src;
+  $("#img-lightbox").classList.remove("hidden");
+}
+
+$("#img-lightbox").addEventListener("click", () => {
+  $("#img-lightbox").classList.add("hidden");
 });
 
-// In production, suppress the webview's browser context menu (Inspect etc. only
-// exist in debug builds anyway, but the copy/reload web menu also feels off).
-if (import.meta.env.PROD) {
-  document.addEventListener("contextmenu", (e) => {
-    const t = e.target as HTMLElement;
-    if (!(t instanceof HTMLInputElement) && !(t instanceof HTMLTextAreaElement)) {
-      e.preventDefault();
-    }
-  });
-}
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    hideEmojiPanel();
+    $("#img-lightbox").classList.add("hidden");
+  }
+});
+
+// Suppress the webview's browser context menu, except on text inputs (where
+// copy/paste is useful). Shift+right-click bypasses it (handy in dev to reach
+// Inspect; devtools don't exist in release builds anyway).
+document.addEventListener("contextmenu", (e) => {
+  if (e.shiftKey) return;
+  const t = e.target as HTMLElement;
+  if (!(t instanceof HTMLInputElement) && !(t instanceof HTMLTextAreaElement)) {
+    e.preventDefault();
+  }
+});
 
 boot();
