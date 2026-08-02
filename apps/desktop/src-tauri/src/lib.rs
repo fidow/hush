@@ -193,6 +193,7 @@ async fn get_history(
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
             // HUSH_PROFILE lets several instances coexist on one machine

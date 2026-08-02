@@ -547,6 +547,21 @@ button.secondary {
   justify-content: flex-end;
 }
 
+label.toggle {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.55rem;
+  color: var(--text);
+  font-size: 0.92rem;
+  cursor: pointer;
+}
+
+label.toggle input {
+  width: auto;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
 .settings-header {
   display: flex;
   align-items: center;

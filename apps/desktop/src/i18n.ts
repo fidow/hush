@@ -88,6 +88,12 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "settings.save": "Guardar",
     "settings.close": "Cerrar",
     "settings.saved": "Ajustes guardados",
+    "settings.notifications": "Mostrar notificaciones",
+    "settings.sound": "Sonido de aviso",
+
+    "notify.image": "📷 Te ha enviado una imagen",
+    "notify.requestTitle": "Nueva solicitud de contacto",
+    "notify.requestBody": "{who} quiere añadirte",
 
     "recovery.title": "Clave de recuperación",
     "recovery.note":
@@ -243,6 +249,12 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "settings.save": "Save",
     "settings.close": "Close",
     "settings.saved": "Settings saved",
+    "settings.notifications": "Show notifications",
+    "settings.sound": "Alert sound",
+
+    "notify.image": "📷 Sent you an image",
+    "notify.requestTitle": "New contact request",
+    "notify.requestBody": "{who} wants to add you",
 
     "recovery.title": "Recovery key",
     "recovery.note":

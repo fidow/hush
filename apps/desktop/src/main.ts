@@ -3,6 +3,14 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { CATEGORIES, MAX_RECENT, RECENT_KEY } from "./emoji";
 import { applyTranslations, LANGUAGES, lang, setLang, t, tError, type Lang } from "./i18n";
+import {
+  alertUser,
+  notificationsEnabled,
+  playChime,
+  setNotificationsEnabled,
+  setSoundEnabled,
+  soundEnabled,
+} from "./notify";
 
 interface Message {
   id: string;
@@ -428,6 +436,8 @@ $("#settings-btn").addEventListener("click", () => {
   ($("#settings-alias") as HTMLInputElement).value = myAlias;
   ($("#settings-status") as HTMLSelectElement).value = myStatus;
   ($("#settings-lang") as HTMLSelectElement).value = lang();
+  ($("#settings-notifications") as HTMLInputElement).checked = notificationsEnabled();
+  ($("#settings-sound") as HTMLInputElement).checked = soundEnabled();
   $("#settings-error").textContent = "";
   // The key is only revealed on demand, never just by opening settings.
   $("#recovery-code").textContent = HIDDEN_KEY;
@@ -440,6 +450,18 @@ $("#settings-btn").addEventListener("click", () => {
 $("#settings-close").addEventListener("click", () =>
   $("#settings").classList.add("hidden"),
 );
+
+// Alert switches apply immediately; the sound one previews itself so the
+// user hears what they just turned on.
+$("#settings-notifications").addEventListener("change", (e) => {
+  setNotificationsEnabled((e.target as HTMLInputElement).checked);
+});
+
+$("#settings-sound").addEventListener("change", (e) => {
+  const on = (e.target as HTMLInputElement).checked;
+  setSoundEnabled(on);
+  if (on) playChime();
+});
 
 // ---- Clave de recuperación ----
 
@@ -731,10 +753,28 @@ listen<{ id: string; sender: string; kind: string; text: string; created_at: num
   "hush://message",
   ({ payload }) => {
     addMessage(payload.sender, { ...payload, mine: false });
+    // Don't interrupt someone already reading that very conversation.
+    const watching = document.hasFocus() && current === payload.sender;
+    if (!watching) {
+      const who = contactLabel(payload.sender);
+      const preview =
+        payload.kind === "image" ? t("notify.image") : payload.text.slice(0, 120);
+      void alertUser(who, preview);
+    }
   },
 );
 
-listen("hush://contacts", () => void refreshContacts());
+listen("hush://contacts", async () => {
+  const before = new Set(
+    [...contacts.entries()].filter(([, c]) => c.state === "incoming").map(([n]) => n),
+  );
+  await refreshContacts();
+  for (const [name, contact] of contacts) {
+    if (contact.state === "incoming" && !before.has(name)) {
+      void alertUser(t("notify.requestTitle"), t("notify.requestBody").replace("{who}", contactLabel(name)));
+    }
+  }
+});
 listen("hush://disconnected", () => toast(t("error.disconnected")));
 
 // ---- Pegar imágenes ----
