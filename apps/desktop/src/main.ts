@@ -533,9 +533,29 @@ $("#settings-form").addEventListener("submit", async (e) => {
 // ---- Alternar entrar / crear cuenta (login por defecto) ----
 
 function setAuthMode(register: boolean) {
+  // Carry what was already typed across, so switching forms is not a retype.
+  const [from, to] = register
+    ? [["#signin-username-input", "#username-input"], ["#signin-password-input", "#password-input"]]
+    : [["#username-input", "#signin-username-input"], ["#password-input", "#signin-password-input"]];
+  for (const [src, dst] of [from, to]) {
+    const value = ($(src) as HTMLInputElement).value;
+    if (value) ($(dst) as HTMLInputElement).value = value;
+  }
+  // The server is a per-form choice too; keep the same one selected.
+  const [serverFrom, serverTo] = register
+    ? ["#signin-server-input", "#server-input"]
+    : ["#server-input", "#signin-server-input"];
+  ($(serverTo) as HTMLSelectElement).value = ($(serverFrom) as HTMLSelectElement).value;
+  ($(serverTo) as HTMLSelectElement).dispatchEvent(new Event("change"));
+
   $("#login-form").classList.toggle("hidden", !register);
   $("#signin-form").classList.toggle("hidden", register);
-  $(register ? "#username-input" : "#signin-username-input").focus();
+  // Land on the first field still empty.
+  const focusOn = register
+    ? ["#username-input", "#alias-input", "#email-input", "#password-input"]
+    : ["#signin-username-input", "#signin-password-input"];
+  const target = focusOn.find((id) => !($(id) as HTMLInputElement).value) ?? focusOn[0];
+  $(target).focus();
 }
 
 $("#to-register").addEventListener("click", () => setAuthMode(true));
