@@ -478,7 +478,7 @@ async fn register(
             .limits
             .allow(&format!("reg-mail:{}", req.email.to_lowercase()), 3, HOUR, now_ms)
     {
-        tracing::warn!(%ip, "registro limitado por exceso de intentos");
+        tracing::warn!(%ip, "registration throttled after too many attempts");
         return Err(too_many());
     }
     // Usernames are case-insensitive: stored and matched in lowercase.
@@ -579,7 +579,9 @@ async fn register(
         }
     }
 
-    tracing::info!(username = %username, email = %req.email, "account created, pending verification");
+    // The address is not logged: it is the one piece of an account that ties
+    // it to a person outside Hush.
+    tracing::info!(username = %username, "account created, pending verification");
     match mail::MailConfig::from_env() {
         Some(cfg) => {
             let (email, username, code) = (req.email.clone(), username.clone(), code.clone());
@@ -1201,7 +1203,9 @@ async fn request_contact(
     .await?;
     tx.commit().await.map_err(internal)?;
 
-    tracing::info!(from = %auth.username, to = %peer, state = %resulting_state, "contact request");
+    // Who added whom is exactly the social graph, so it stays at debug like
+    // message metadata: an info-level log must not record it.
+    tracing::debug!(from = %auth.username, to = %peer, state = %resulting_state, "contact request");
     notify_contacts_changed(&state, &peer).await;
     Ok(Json(serde_json::json!({ "state": resulting_state })))
 }
@@ -1221,7 +1225,7 @@ async fn accept_contact(
     set_link(&mut tx, &peer, &auth.username, "accepted").await?;
     tx.commit().await.map_err(internal)?;
 
-    tracing::info!(user = %auth.username, peer = %peer, "contact accepted");
+    tracing::debug!(user = %auth.username, peer = %peer, "contact accepted");
     notify_contacts_changed(&state, &peer).await;
     Ok(Json(serde_json::json!({ "state": "accepted" })))
 }
@@ -1257,7 +1261,7 @@ async fn block_contact(
         .map_err(internal)?;
     tx.commit().await.map_err(internal)?;
 
-    tracing::info!(user = %auth.username, peer = %peer, "contact blocked");
+    tracing::debug!(user = %auth.username, peer = %peer, "contact blocked");
     notify_contacts_changed(&state, &peer).await;
     Ok(Json(serde_json::json!({ "state": "blocked" })))
 }
@@ -1278,7 +1282,7 @@ async fn remove_contact(
         .execute(&state.db)
         .await
         .map_err(internal)?;
-    tracing::info!(user = %auth.username, peer = %peer, "contact removed");
+    tracing::debug!(user = %auth.username, peer = %peer, "contact removed");
     notify_contacts_changed(&state, &peer).await;
     Ok(StatusCode::NO_CONTENT)
 }
