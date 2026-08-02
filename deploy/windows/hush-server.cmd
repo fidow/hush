@@ -32,8 +32,14 @@ rem Fichero de log. Como tarea programada no hay consola donde mirar, asi que
 rem sin esto el registro se pierde. Vale cualquier ruta absoluta: otra unidad
 rem (D:\logs\hush.log) o un recurso de red (\\servidor\logs\hush.log). La
 rem carpeta se crea sola. Rota a diario: hush.log.2026-08-02, y los ficheros
-rem antiguos no se borran solos.
+rem antiguos se van borrando segun HUSH_LOG_KEEP_DAYS.
 set HUSH_LOG_FILE=C:\hush\logs\hush.log
+
+rem Dias de logs rotados que se conservan. Los mas antiguos se borran al
+rem arrancar y una vez al dia. Solo se tocan los ficheros generados por el
+rem propio servidor, nunca otros que haya en esa carpeta. Con 0 no se borra
+rem nada y se conservan indefinidamente.
+set HUSH_LOG_KEEP_DAYS=30
 
 rem --- Correo ----------------------------------------------------------------
 rem Sin esto nadie puede verificar su cuenta ni recuperar la contrasena.
