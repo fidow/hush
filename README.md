@@ -48,7 +48,7 @@ register a different username in each, add the other user as contact and chat.
 | `HUSH_LOG` | `info` | Log level; set `debug` to trace users/messages (toggleable debug mode) |
 | `HUSH_SMTP_HOST` | *(unset)* | SMTP relay for verification emails; unset = codes are logged instead |
 | `HUSH_SMTP_PORT` | `25` | SMTP port |
-| `HUSH_SMTP_FROM` | `hush@localhost` | From address (e.g. `hush@example.com`) |
+| `HUSH_SMTP_FROM` | `hush@localhost` | From address; a bare address gets the `Hush <…>` display name |
 | `HUSH_SMTP_USER` / `HUSH_SMTP_PASS` | *(unset)* | Optional SMTP credentials |
 | `HUSH_SMTP_STARTTLS` | *(unset)* | Set to `1` to use STARTTLS |
 | `HUSH_ECHO_CODE` | *(unset)* | Set to `1` (dev only!) to echo verification codes in the API response |

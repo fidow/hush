@@ -1,9 +1,9 @@
 //! Outgoing email. Fully configured via environment variables so any SMTP
 //! relay can be used:
 //!
-//! - `HUSH_SMTP_HOST`     e.g. `smtp.example.com` (unset = no email; codes are logged)
+//! - `HUSH_SMTP_HOST`     relay host (unset = no email; codes are logged)
 //! - `HUSH_SMTP_PORT`     default `25`
-//! - `HUSH_SMTP_FROM`     e.g. `hush@example.com`
+//! - `HUSH_SMTP_FROM`     sender address, e.g. `hush@example.com`
 //! - `HUSH_SMTP_USER` / `HUSH_SMTP_PASS`  optional credentials
 //! - `HUSH_SMTP_STARTTLS` set to `1` to use STARTTLS
 
