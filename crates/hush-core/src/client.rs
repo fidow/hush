@@ -10,6 +10,7 @@ use std::path::PathBuf;
 
 use tokio::sync::{mpsc, oneshot};
 
+use crate::archive::{ArchiveEntry, ArchiveKey};
 use crate::db::{LocalDb, Profile, StoredMessage};
 use crate::{ApiClient, Engine, IncomingMessage};
 
@@ -59,6 +60,7 @@ enum Command {
         alias: String,
         email: String,
         password: String,
+        history_passphrase: String,
         reply: oneshot::Sender<Result<Option<String>, String>>,
     },
     Verify {
@@ -69,6 +71,8 @@ enum Command {
         server: String,
         username: String,
         password: String,
+        /// Needed only to restore history on a device that doesn't have it.
+        history_passphrase: String,
         reply: oneshot::Sender<Result<ProfileInfo, String>>,
     },
     Connect {
@@ -142,13 +146,15 @@ impl HushClient {
         alias: &str,
         email: &str,
         password: &str,
+        history_passphrase: &str,
     ) -> Result<Option<String>, String> {
-        let (server, username, alias, email, password) = (
+        let (server, username, alias, email, password, history_passphrase) = (
             server.to_string(),
             username.to_string(),
             alias.to_string(),
             email.to_string(),
             password.to_string(),
+            history_passphrase.to_string(),
         );
         self.request(|reply| Command::Register {
             server,
@@ -156,6 +162,7 @@ impl HushClient {
             alias,
             email,
             password,
+            history_passphrase,
             reply,
         })
         .await
@@ -176,13 +183,19 @@ impl HushClient {
         server: &str,
         username: &str,
         password: &str,
+        history_passphrase: &str,
     ) -> Result<ProfileInfo, String> {
-        let (server, username, password) =
-            (server.to_string(), username.to_string(), password.to_string());
+        let (server, username, password, history_passphrase) = (
+            server.to_string(),
+            username.to_string(),
+            password.to_string(),
+            history_passphrase.to_string(),
+        );
         self.request(|reply| Command::Login {
             server,
             username,
             password,
+            history_passphrase,
             reply,
         })
         .await
@@ -255,6 +268,7 @@ struct Pending {
     username: String,
     alias: String,
     server: String,
+    archive_key: ArchiveKey,
 }
 
 struct Actor {
@@ -262,6 +276,9 @@ struct Actor {
     pending: Option<Pending>,
     session: Option<Session>,
     events: Option<mpsc::Sender<DecryptedMessage>>,
+    /// Key protecting the history archive; absent until the user provides
+    /// their history passphrase on this device.
+    archive_key: Option<ArchiveKey>,
 }
 
 fn now_ms() -> i64 {
@@ -279,10 +296,17 @@ impl Actor {
         alias: &str,
         email: &str,
         password: &str,
+        history_passphrase: &str,
     ) -> anyhow::Result<Option<String>> {
+        if history_passphrase.len() < 8 {
+            anyhow::bail!("La frase de historial debe tener al menos 8 caracteres");
+        }
         // A new account means a clean slate on this device.
         self.db.clear_all()?;
         self.session = None;
+        self.archive_key = None;
+        let salt = crate::archive::new_salt();
+        let archive_key = ArchiveKey::derive(history_passphrase, &salt)?;
         let engine = Engine::open(self.db.clone(), username)?;
         let mut api = ApiClient::new(server.trim_end_matches('/'));
         let dev_code = api
@@ -291,6 +315,7 @@ impl Actor {
                 alias,
                 email,
                 password,
+                &salt,
                 engine.registration_id().await?,
                 &engine.identity_key_b64().await?,
             )
@@ -301,6 +326,7 @@ impl Actor {
             username: username.to_string(),
             alias: alias.to_string(),
             server: server.trim_end_matches('/').to_string(),
+            archive_key,
         });
         Ok(dev_code)
     }
@@ -320,6 +346,9 @@ impl Actor {
             server: pending.server,
             token: pending.api.token().unwrap_or_default().to_string(),
         })?;
+        self.db
+            .meta_set("archive_key", &pending.archive_key.to_b64())?;
+        self.archive_key = Some(pending.archive_key);
         self.session = Some(Session {
             engine: pending.engine,
             api: pending.api,
@@ -327,11 +356,61 @@ impl Actor {
         Ok(())
     }
 
+    /// Re-encrypts a message under the history key and uploads it. Best
+    /// effort: a failure here must never break sending or receiving.
+    async fn archive_message(&self, msg: &StoredMessage) {
+        let (Some(key), Some(session)) = (self.archive_key.as_ref(), self.session.as_ref()) else {
+            return;
+        };
+        let blob = match key.encrypt_entry(&ArchiveEntry::from(msg)) {
+            Ok(blob) => blob,
+            Err(e) => {
+                tracing::warn!("cannot encrypt history entry: {e}");
+                return;
+            }
+        };
+        if let Err(e) = session.api.put_archive(&msg.id, &blob).await {
+            tracing::warn!("cannot upload history entry: {e}");
+        }
+    }
+
+    /// Downloads the encrypted archive and merges it into the local database.
+    /// Returns how many messages were restored.
+    async fn restore_archive(&self, key: &ArchiveKey) -> anyhow::Result<usize> {
+        let session = self
+            .session
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("no session"))?;
+        let entries = session.api.list_archive().await?;
+        let mut restored = 0;
+        let mut failed = 0;
+        for (_, blob) in &entries {
+            match key.decrypt_entry(blob) {
+                Ok(entry) => {
+                    let msg = StoredMessage::from(entry);
+                    // Remember the contact too, so restored chats are listed.
+                    let _ = self.db.upsert_contact(&msg.contact, &msg.contact);
+                    if self.db.add_message(&msg).is_ok() {
+                        restored += 1;
+                    }
+                }
+                Err(_) => failed += 1,
+            }
+        }
+        // All entries failing means the passphrase was wrong, not corruption.
+        if restored == 0 && failed > 0 {
+            anyhow::bail!("Frase de historial incorrecta");
+        }
+        tracing::info!("restored {restored} archived messages ({failed} unreadable)");
+        Ok(restored)
+    }
+
     async fn handle_login(
         &mut self,
         server: &str,
         username: &str,
         password: &str,
+        history_passphrase: &str,
     ) -> anyhow::Result<ProfileInfo> {
         let server = server.trim_end_matches('/');
         let same_account = self
@@ -342,11 +421,12 @@ impl Actor {
             // Different account (or first login on this device): clean slate.
             self.db.clear_all()?;
             self.session = None;
+            self.archive_key = None;
         }
 
         let mut engine = Engine::open(self.db.clone(), username)?;
         let mut api = ApiClient::new(server);
-        api.login(username, password).await?;
+        let salt = api.login(username, password).await?;
 
         if !same_account {
             // Fresh keys for this device; publishing them also updates our
@@ -364,6 +444,20 @@ impl Actor {
         };
         self.db.save_profile(&profile)?;
         self.session = Some(Session { engine, api });
+
+        // Restore the history archive when the user supplied their passphrase
+        // (needed on a device that has no local copy of the key).
+        self.archive_key = match self.db.meta_get("archive_key")? {
+            Some(stored) => Some(ArchiveKey::from_b64(&stored)?),
+            None if !history_passphrase.is_empty() => {
+                let key = ArchiveKey::derive(history_passphrase, &salt)?;
+                self.restore_archive(&key).await?;
+                self.db.meta_set("archive_key", &key.to_b64())?;
+                Some(key)
+            }
+            None => None,
+        };
+
         Ok(ProfileInfo {
             username: profile.username,
             alias: profile.alias,
@@ -381,6 +475,11 @@ impl Actor {
             let mut api = ApiClient::new(&profile.server);
             api.set_token(&profile.token);
             self.session = Some(Session { engine, api });
+        }
+        if self.archive_key.is_none() {
+            if let Some(stored) = self.db.meta_get("archive_key")? {
+                self.archive_key = ArchiveKey::from_b64(&stored).ok();
+            }
         }
         let session = self.session.as_ref().expect("just set");
         Ok(session.api.stream().await?)
@@ -429,10 +528,10 @@ impl Actor {
         Ok(stored)
     }
 
-    async fn handle_incoming(&mut self, msg: IncomingMessage) {
-        let Some(session) = self.session.as_mut() else {
-            return;
-        };
+    /// Returns the stored message so the caller can archive it once the
+    /// session borrow is released.
+    async fn handle_incoming(&mut self, msg: IncomingMessage) -> Option<StoredMessage> {
+        let session = self.session.as_mut()?;
         match session.engine.decrypt(&msg.sender, &msg.body).await {
             Ok(plain) => {
                 let _ = session.api.ack_message(&msg.id).await;
@@ -466,20 +565,22 @@ impl Actor {
                 if let Some(events) = &self.events {
                     let _ = events
                         .send(DecryptedMessage {
-                            id: stored.id,
-                            sender: stored.contact,
-                            kind: stored.kind,
-                            text: stored.text,
+                            id: stored.id.clone(),
+                            sender: stored.contact.clone(),
+                            kind: stored.kind.clone(),
+                            text: stored.text.clone(),
                             created_at: stored.created_at,
                         })
                         .await;
                 }
+                Some(stored)
             }
             Err(e) => {
                 tracing::warn!("failed to decrypt message {} from {}: {e}", msg.id, msg.sender);
                 // Ack anyway: an undecryptable message (stale session from a
                 // previous device) would otherwise be redelivered forever.
                 let _ = session.api.ack_message(&msg.id).await;
+                None
             }
         }
     }
@@ -498,6 +599,7 @@ async fn actor(db_path: PathBuf, mut commands: mpsc::Receiver<Command>) {
         pending: None,
         session: None,
         events: None,
+        archive_key: None,
     };
     let mut stream: Option<mpsc::Receiver<IncomingMessage>> = None;
 
@@ -513,9 +615,16 @@ async fn actor(db_path: PathBuf, mut commands: mpsc::Receiver<Command>) {
                     }));
                     let _ = reply.send(result.map_err(|e| e.to_string()));
                 }
-                Some(Command::Register { server, username, alias, email, password, reply }) => {
+                Some(Command::Register { server, username, alias, email, password, history_passphrase, reply }) => {
                     let result = actor
-                        .handle_register(&server, &username.to_lowercase(), &alias, &email, &password)
+                        .handle_register(
+                            &server,
+                            &username.to_lowercase(),
+                            &alias,
+                            &email,
+                            &password,
+                            &history_passphrase,
+                        )
                         .await;
                     let _ = reply.send(result.map_err(|e| e.to_string()));
                 }
@@ -523,9 +632,14 @@ async fn actor(db_path: PathBuf, mut commands: mpsc::Receiver<Command>) {
                     let result = actor.handle_verify(&code).await;
                     let _ = reply.send(result.map_err(|e| e.to_string()));
                 }
-                Some(Command::Login { server, username, password, reply }) => {
+                Some(Command::Login { server, username, password, history_passphrase, reply }) => {
                     let result = actor
-                        .handle_login(&server, &username.to_lowercase(), &password)
+                        .handle_login(
+                            &server,
+                            &username.to_lowercase(),
+                            &password,
+                            &history_passphrase,
+                        )
                         .await;
                     let _ = reply.send(result.map_err(|e| e.to_string()));
                 }
@@ -546,6 +660,9 @@ async fn actor(db_path: PathBuf, mut commands: mpsc::Receiver<Command>) {
                     let result = actor
                         .handle_send(&recipient.to_lowercase(), &kind, &content)
                         .await;
+                    if let Ok(stored) = &result {
+                        actor.archive_message(stored).await;
+                    }
                     let _ = reply.send(result.map_err(|e| e.to_string()));
                 }
                 Some(Command::AddContact { username, reply }) => {
@@ -572,7 +689,11 @@ async fn actor(db_path: PathBuf, mut commands: mpsc::Receiver<Command>) {
             },
             msg = async { stream.as_mut().expect("guarded by if").recv().await }, if stream.is_some() => {
                 match msg {
-                    Some(msg) => actor.handle_incoming(msg).await,
+                    Some(msg) => {
+                        if let Some(stored) = actor.handle_incoming(msg).await {
+                            actor.archive_message(&stored).await;
+                        }
+                    }
                     None => {
                         // Server connection dropped: closing `events` tells the UI.
                         stream = None;

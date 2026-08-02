@@ -86,6 +86,7 @@ impl ApiClient {
         alias: &str,
         email: &str,
         password: &str,
+        archive_salt: &str,
         registration_id: u32,
         identity_key_b64: &str,
     ) -> Result<Option<String>> {
@@ -97,6 +98,7 @@ impl ApiClient {
                 "alias": alias,
                 "email": email,
                 "password": password,
+                "archive_salt": archive_salt,
                 "registration_id": registration_id,
                 "identity_key": identity_key_b64,
             }))
@@ -126,8 +128,9 @@ impl ApiClient {
         Ok(())
     }
 
-    /// Logs into an existing (verified) account and stores the session token.
-    pub async fn login(&mut self, username: &str, password: &str) -> Result<()> {
+    /// Logs into an existing (verified) account, stores the session token and
+    /// returns the account's history salt.
+    pub async fn login(&mut self, username: &str, password: &str) -> Result<String> {
         let res = self
             .http
             .post(format!("{}/v1/sessions", self.base))
@@ -142,7 +145,40 @@ impl ApiClient {
                 .context("no token in response")?
                 .to_string(),
         );
+        Ok(body["archive_salt"].as_str().unwrap_or_default().to_string())
+    }
+
+    /// Uploads one encrypted history entry.
+    pub async fn put_archive(&self, id: &str, blob: &str) -> Result<()> {
+        let req = self.auth(self.http.put(format!("{}/v1/archive/{id}", self.base)))?;
+        Self::check(
+            req.json(&json!({ "blob": blob }))
+                .send()
+                .await
+                .map_err(Self::conn_err)?,
+        )
+        .await?;
         Ok(())
+    }
+
+    /// Downloads the whole encrypted history archive as `(id, blob)` pairs.
+    pub async fn list_archive(&self) -> Result<Vec<(String, String)>> {
+        let req = self.auth(self.http.get(format!("{}/v1/archive", self.base)))?;
+        let body: Value = Self::check(req.send().await.map_err(Self::conn_err)?)
+            .await?
+            .json()
+            .await?;
+        Ok(body["entries"]
+            .as_array()
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(|e| {
+                        Some((e["id"].as_str()?.to_string(), e["blob"].as_str()?.to_string()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default())
     }
 
     /// Public profile (alias + current identity key) of a user.

@@ -57,6 +57,20 @@ Accounts require a username, a public alias, an email and a password
 (argon2-hashed). New accounts must be confirmed with a 6-digit code sent by
 email before they can log in or exchange messages.
 
+### History across devices
+
+Private keys can never travel through the server, so a new device starts with
+fresh keys and no history. To avoid losing conversations, each device
+re-encrypts every message it sends or receives under a key derived from the
+user's **history passphrase** (Argon2id → XChaCha20-Poly1305) and uploads the
+result. Signing in elsewhere and entering that passphrase restores the full
+history; the server only ever stores opaque blobs. Both primitives are
+symmetric, so this layer is quantum-resistant on its own.
+
+The passphrase is deliberately separate from the login password, which the
+server does see during authentication. Losing it means losing the archive —
+there is no recovery path by design.
+
 ## License
 
 AGPL-3.0-only.

@@ -21,9 +21,17 @@ async fn register(
     alias: String,
     email: String,
     password: String,
+    historyPassphrase: String,
 ) -> Result<Option<String>, String> {
     client
-        .register(&server, &username, &alias, &email, &password)
+        .register(
+            &server,
+            &username,
+            &alias,
+            &email,
+            &password,
+            &historyPassphrase,
+        )
         .await
 }
 
@@ -42,8 +50,11 @@ async fn login(
     server: String,
     username: String,
     password: String,
+    historyPassphrase: String,
 ) -> Result<ProfileInfo, String> {
-    client.login(&server, &username, &password).await
+    client
+        .login(&server, &username, &password, &historyPassphrase)
+        .await
 }
 
 /// Opens the message stream; incoming messages arrive as `hush://message`

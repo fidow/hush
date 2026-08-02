@@ -229,6 +229,7 @@ $("#login-form").addEventListener("submit", async (e) => {
       alias: ($("#alias-input") as HTMLInputElement).value.trim(),
       email: ($("#email-input") as HTMLInputElement).value.trim(),
       password: ($("#password-input") as HTMLInputElement).value,
+      historyPassphrase: ($("#history-input") as HTMLInputElement).value,
     });
     me = ($("#username-input") as HTMLInputElement).value.trim().toLowerCase();
     myAlias = ($("#alias-input") as HTMLInputElement).value.trim() || me;
@@ -273,6 +274,7 @@ $("#signin-form").addEventListener("submit", async (e) => {
       server: ($("#signin-server-input") as HTMLInputElement).value.trim(),
       username: ($("#signin-username-input") as HTMLInputElement).value.trim().toLowerCase(),
       password: ($("#signin-password-input") as HTMLInputElement).value,
+      historyPassphrase: ($("#signin-history-input") as HTMLInputElement).value,
     });
     await enterChat(profile);
   } catch (err) {
@@ -545,8 +547,58 @@ async function copyImageToClipboard(dataUrl: string) {
 document.addEventListener("contextmenu", (e) => {
   if (e.shiftKey) return;
   const t = e.target as HTMLElement;
-  if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement) return;
   e.preventDefault();
+
+  // Text fields get the usual editing actions, but rendered by the app.
+  if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement) {
+    const input = t;
+    const hasSelection = input.selectionStart !== input.selectionEnd;
+    const selected = () =>
+      input.value.slice(input.selectionStart ?? 0, input.selectionEnd ?? 0);
+    const replaceSelection = (text: string) => {
+      const start = input.selectionStart ?? input.value.length;
+      const end = input.selectionEnd ?? input.value.length;
+      input.value = input.value.slice(0, start) + text + input.value.slice(end);
+      const pos = start + text.length;
+      input.setSelectionRange(pos, pos);
+      input.focus();
+    };
+    const items: CtxItem[] = [];
+    if (hasSelection) {
+      items.push({
+        label: "Cortar",
+        action: () => {
+          navigator.clipboard.writeText(selected());
+          replaceSelection("");
+        },
+      });
+      items.push({
+        label: "Copiar",
+        action: () => void navigator.clipboard.writeText(selected()),
+      });
+    }
+    items.push({
+      label: "Pegar",
+      action: async () => {
+        try {
+          replaceSelection(await navigator.clipboard.readText());
+        } catch {
+          toast("No se pudo pegar");
+        }
+      },
+    });
+    if (input.value) {
+      items.push({
+        label: "Seleccionar todo",
+        action: () => {
+          input.focus();
+          input.select();
+        },
+      });
+    }
+    showContextMenu(items, e.clientX, e.clientY);
+    return;
+  }
 
   const bubble = t.closest<HTMLElement>(".bubble");
   if (bubble) {

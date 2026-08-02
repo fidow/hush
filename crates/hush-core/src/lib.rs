@@ -5,6 +5,7 @@
 //! - [`api::ApiClient`]: HTTP client for the Hush relay server.
 
 pub mod api;
+pub mod archive;
 pub mod client;
 pub mod db;
 pub mod engine;

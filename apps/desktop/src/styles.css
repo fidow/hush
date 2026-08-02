@@ -99,6 +99,11 @@ label {
   color: var(--muted);
 }
 
+label small {
+  opacity: 0.7;
+  font-size: 0.75rem;
+}
+
 input {
   background: var(--panel-2);
   border: 1px solid transparent;

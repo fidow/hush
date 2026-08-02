@@ -32,11 +32,16 @@
             Contraseña
             <input id="signin-password-input" type="password" required />
           </label>
+          <label>
+            Frase de historial <small>(solo en un dispositivo nuevo)</small>
+            <input id="signin-history-input" type="password" placeholder="para recuperar tus conversaciones" />
+          </label>
           <button type="submit" id="signin-btn">Entrar</button>
           <p id="signin-error" class="error"></p>
           <p class="hint">
-            Si entras desde un dispositivo nuevo se generarán claves de cifrado
-            nuevas; el historial anterior no se transfiere.
+            En un dispositivo nuevo se generan claves de cifrado nuevas. Tu
+            historial se recupera del archivo cifrado si escribes tu frase de
+            historial: nadie más puede leerlo, ni el servidor.
           </p>
           <button type="button" id="to-register" class="switch-link">
             ¿No tienes cuenta? Crear una
@@ -64,6 +69,15 @@
             Contraseña
             <input id="password-input" type="password" minlength="8" placeholder="mínimo 8 caracteres" required />
           </label>
+          <label>
+            Frase de historial
+            <input id="history-input" type="password" minlength="8" placeholder="distinta de la contraseña" required />
+          </label>
+          <p class="hint">
+            La frase de historial cifra tus conversaciones para poder
+            recuperarlas en otro dispositivo. El servidor nunca la conoce:
+            si la olvidas, el historial no se puede recuperar.
+          </p>
           <button type="submit" id="login-btn">Crear cuenta</button>
           <p id="login-error" class="error"></p>
           <button type="button" id="to-signin" class="switch-link">
