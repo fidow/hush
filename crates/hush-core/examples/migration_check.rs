@@ -36,14 +36,14 @@ fn main() -> anyhow::Result<()> {
         .enable_all()
         .build()?;
     rt.block_on(async {
-        let engine = Engine::open(db, &username)?;
+        let engine = Engine::open(db, &username, 1)?;
         println!("identity key: {}", engine.identity_key_b64().await?);
         println!("registration id: {}", engine.registration_id().await?);
         for (contact, _, _) in &contacts {
             println!(
                 "session with {contact}: {} / known identity: {}",
-                engine.has_session(contact).await?,
-                engine.known_identity_b64(contact).await?.is_some(),
+                engine.has_session(contact, 1).await?,
+                engine.known_identity_b64(contact, 1).await?.is_some(),
             );
         }
         anyhow::Ok(())

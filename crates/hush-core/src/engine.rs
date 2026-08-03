@@ -34,8 +34,13 @@ pub(crate) fn os_rng() -> impl CryptoRng + RngCore + Send {
     rand::rngs::OsRng.unwrap_err()
 }
 
-fn device_one() -> DeviceId {
-    DeviceId::new(1).expect("1 is a valid device id")
+/// Every device of an account gets its own Signal address, so a message is
+/// encrypted separately for each and no ratchet is ever shared.
+fn device_id(device: u32) -> DeviceId {
+    // Signal device ids are a byte, which is why the server hands out the
+    // lowest free number rather than counting upwards forever.
+    let device = u8::try_from(device).unwrap_or(1).max(1);
+    DeviceId::new(device).expect("device ids start at 1")
 }
 
 fn now_timestamp() -> Timestamp {
@@ -66,11 +71,11 @@ pub struct Engine {
 impl Engine {
     /// Opens the engine over the local database, loading the persisted
     /// identity or generating a fresh one on first use.
-    pub fn open(db: LocalDb, username: &str) -> Result<Self> {
+    pub fn open(db: LocalDb, username: &str, device: u32) -> Result<Self> {
         let identity = SqliteIdentityStore { db: db.clone() };
         identity.ensure_identity()?;
         Ok(Self {
-            address: ProtocolAddress::new(username.to_string(), device_one()),
+            address: ProtocolAddress::new(username.to_string(), device_id(device)),
             sessions: SqliteSessionStore { db: db.clone() },
             prekeys: SqlitePreKeyStore { db: db.clone() },
             signed_prekeys: SqliteSignedPreKeyStore { db: db.clone() },
@@ -172,14 +177,14 @@ impl Engine {
         }))
     }
 
-    pub async fn has_session(&self, remote: &str) -> Result<bool> {
-        let addr = ProtocolAddress::new(remote.to_string(), device_one());
+    pub async fn has_session(&self, remote: &str, device: u32) -> Result<bool> {
+        let addr = ProtocolAddress::new(remote.to_string(), device_id(device));
         Ok(self.sessions.load_session(&addr).await?.is_some())
     }
 
     /// The identity key we have on record for `remote`, if any (base64).
-    pub async fn known_identity_b64(&self, remote: &str) -> Result<Option<String>> {
-        let addr = ProtocolAddress::new(remote.to_string(), device_one());
+    pub async fn known_identity_b64(&self, remote: &str, device: u32) -> Result<Option<String>> {
+        let addr = ProtocolAddress::new(remote.to_string(), device_id(device));
         Ok(self
             .identity
             .get_identity(&addr)
@@ -189,8 +194,8 @@ impl Engine {
 
     /// Drops the session and recorded identity for `remote` (e.g. after the
     /// contact re-provisioned their keys on a new device).
-    pub fn reset_session(&mut self, remote: &str) -> Result<()> {
-        let addr = ProtocolAddress::new(remote.to_string(), device_one());
+    pub fn reset_session(&mut self, remote: &str, device: u32) -> Result<()> {
+        let addr = ProtocolAddress::new(remote.to_string(), device_id(device));
         let key = format!("{}:{}", addr.name(), u32::from(addr.device_id()));
         self.db.with(|c| {
             c.execute("DELETE FROM sessions WHERE address = ?1", [&key])?;
@@ -201,8 +206,8 @@ impl Engine {
 
     /// Establishes a PQXDH session with `remote` from a bundle returned by
     /// `GET /v1/keys/{remote}`. No-op if a session already exists.
-    pub async fn ensure_session(&mut self, remote: &str, bundle: &Value) -> Result<()> {
-        let addr = ProtocolAddress::new(remote.to_string(), device_one());
+    pub async fn ensure_session(&mut self, remote: &str, device: u32, bundle: &Value) -> Result<()> {
+        let addr = ProtocolAddress::new(remote.to_string(), device_id(device));
         if self.sessions.load_session(&addr).await?.is_some() {
             return Ok(());
         }
@@ -240,7 +245,7 @@ impl Engine {
         let spk = &stat["signed_prekey"];
         let pqxdh_bundle = PreKeyBundle::new(
             registration_id,
-            device_one(),
+            device_id(device),
             pre_key,
             (spk["id"].as_u64().context("spk id")? as u32).into(),
             PublicKey::deserialize(&b64_field(&spk["public"], "spk public")?)?,
@@ -266,8 +271,8 @@ impl Engine {
 
     /// Encrypts `plaintext` for `remote` (session must exist) and returns the
     /// envelope string to send as the message body.
-    pub async fn encrypt(&mut self, remote: &str, plaintext: &[u8]) -> Result<String> {
-        let addr = ProtocolAddress::new(remote.to_string(), device_one());
+    pub async fn encrypt(&mut self, remote: &str, device: u32, plaintext: &[u8]) -> Result<String> {
+        let addr = ProtocolAddress::new(remote.to_string(), device_id(device));
         let msg = message_encrypt(
             plaintext,
             &addr,
@@ -290,8 +295,8 @@ impl Engine {
     }
 
     /// Decrypts an envelope received from `remote`.
-    pub async fn decrypt(&mut self, remote: &str, envelope: &str) -> Result<Vec<u8>> {
-        let addr = ProtocolAddress::new(remote.to_string(), device_one());
+    pub async fn decrypt(&mut self, remote: &str, device: u32, envelope: &str) -> Result<Vec<u8>> {
+        let addr = ProtocolAddress::new(remote.to_string(), device_id(device));
         let env: Envelope = serde_json::from_str(envelope).context("bad envelope")?;
         let raw = B64.decode(&env.c).context("bad envelope base64")?;
         let msg = match env.t.as_str() {

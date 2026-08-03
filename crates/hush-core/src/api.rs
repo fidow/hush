@@ -43,8 +43,16 @@ pub enum ServerEvent {
 pub struct IncomingMessage {
     pub id: String,
     pub sender: String,
+    /// Which of the sender's devices wrote it: each has its own session with
+    /// us. Servers that predate devices do not send it.
+    #[serde(default = "first_device")]
+    pub sender_device: i64,
     pub body: String,
     pub created_at: i64,
+}
+
+fn first_device() -> i64 {
+    1
 }
 
 pub struct ApiClient {
@@ -162,11 +170,26 @@ impl ApiClient {
     }
 
     /// Logs into an existing (verified) account and stores the session token.
-    pub async fn login(&mut self, username: &str, password: &str) -> Result<()> {
+    /// Signs in. `device_id` keeps this device's place on the account, its
+    /// queue and its sessions; without one the account gains a new device.
+    /// Returns the device this session belongs to.
+    pub async fn login(
+        &mut self,
+        username: &str,
+        password: &str,
+        device_id: Option<i64>,
+        device_name: &str,
+    ) -> Result<i64> {
         let res = self
             .http
             .post(format!("{}/v1/sessions", self.base))
-            .json(&json!({ "username": username, "password": password }))
+            .json(&json!({
+                "username": username,
+                "password": password,
+                "device_id": device_id,
+                "new_device": device_id.is_none(),
+                "device_name": device_name,
+            }))
             .send()
             .await
             .map_err(Self::conn_err)?;
@@ -177,7 +200,8 @@ impl ApiClient {
                 .context("no token in response")?
                 .to_string(),
         );
-        Ok(())
+        // A server that predates devices answers with a token alone.
+        Ok(body["device_id"].as_i64().unwrap_or(1))
     }
 
     /// Uploads one encrypted history entry.
@@ -273,17 +297,69 @@ impl ApiClient {
         Ok(Self::check(req.send().await.map_err(Self::conn_err)?).await?.json().await?)
     }
 
-    /// Sends an encrypted envelope; returns the server-assigned message id.
-    pub async fn send_message(&self, recipient: &str, envelope: &str) -> Result<String> {
+    /// Sends one encrypted copy per recipient device; returns the id the whole
+    /// fan-out shares, so the sender still tracks a single message.
+    pub async fn send_message(
+        &self,
+        recipient: &str,
+        envelopes: &[(i64, String)],
+    ) -> Result<String> {
+        let envelopes: Vec<Value> = envelopes
+            .iter()
+            .map(|(device, body)| json!({ "device": device, "body": body }))
+            .collect();
         let req = self.auth(
             self.http
                 .put(format!("{}/v1/messages/{recipient}", self.base)),
         )?;
-        let body: Value = Self::check(req.json(&json!({ "body": envelope })).send().await.map_err(Self::conn_err)?)
+        let body: Value = Self::check(
+            req.json(&json!({ "envelopes": envelopes }))
+                .send()
+                .await
+                .map_err(Self::conn_err)?,
+        )
+        .await?
+        .json()
+        .await?;
+        Ok(body["id"].as_str().context("no id in response")?.to_string())
+    }
+
+    /// Bundles for every device of `username`, each with the device it belongs
+    /// to. Falls back to the single-device endpoint on an older server.
+    pub async fn fetch_bundles(&self, username: &str) -> Result<Vec<(i64, Value)>> {
+        let req = self.auth(
+            self.http
+                .get(format!("{}/v1/keys/{username}/devices", self.base)),
+        )?;
+        let res = req.send().await.map_err(Self::conn_err)?;
+        if res.status() == reqwest::StatusCode::NOT_FOUND {
+            let bundle = self.fetch_bundle(username).await?;
+            let device = bundle["device"].as_i64().unwrap_or(1);
+            return Ok(vec![(device, bundle)]);
+        }
+        let body: Value = Self::check(res).await?.json().await?;
+        let devices = body["devices"].as_array().context("no devices")?;
+        Ok(devices
+            .iter()
+            .map(|d| (d["device"].as_i64().unwrap_or(1), d.clone()))
+            .collect())
+    }
+
+    /// The account's devices, as shown in settings.
+    pub async fn list_devices(&self) -> Result<Vec<Value>> {
+        let req = self.auth(self.http.get(format!("{}/v1/devices", self.base)))?;
+        let body: Value = Self::check(req.send().await.map_err(Self::conn_err)?)
             .await?
             .json()
             .await?;
-        Ok(body["id"].as_str().context("no id in response")?.to_string())
+        Ok(body["devices"].as_array().cloned().unwrap_or_default())
+    }
+
+    /// Signs a device out for good: its token stops working and its queue goes.
+    pub async fn revoke_device(&self, device: i64) -> Result<()> {
+        let req = self.auth(self.http.delete(format!("{}/v1/devices/{device}", self.base)))?;
+        Self::check(req.send().await.map_err(Self::conn_err)?).await?;
+        Ok(())
     }
 
     /// Tells the sender that we have read their message.

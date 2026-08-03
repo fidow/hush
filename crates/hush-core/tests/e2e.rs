@@ -32,7 +32,7 @@ async fn pending_code(pool: &sqlx::SqlitePool, username: &str) -> String {
 }
 
 async fn onboard(base: &str, pool: &sqlx::SqlitePool, username: &str) -> (Engine, ApiClient) {
-    let mut engine = Engine::open(LocalDb::open_in_memory().unwrap(), username).unwrap();
+    let mut engine = Engine::open(LocalDb::open_in_memory().unwrap(), username, 1).unwrap();
     let mut api = ApiClient::new(base);
     api.register(
         username,
@@ -187,6 +187,65 @@ async fn wait_for_text(client: &hush_core::HushClient, contact: &str, text: &str
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+/// Two devices of the same account, both signed in at once: each is written
+/// to separately, and what one sends shows up on the other.
+#[tokio::test]
+async fn both_devices_of_an_account_see_the_conversation() {
+    use hush_core::HushClient;
+
+    let (base, pool) = spawn_server().await;
+    let dir = std::env::temp_dir().join(format!("hush-multi-{}", uuid::Uuid::new_v4()));
+
+    let laptop = HushClient::spawn(dir.join("laptop.db"));
+    laptop
+        .register(&base, "alice", "Alicia", "alice@example.com", "supersecreta")
+        .await
+        .unwrap();
+    laptop.verify(&pending_code(&pool, "alice").await).await.unwrap();
+    let bob = HushClient::spawn(dir.join("bob.db"));
+    bob.register(&base, "bob", "Roberto", "bob@example.com", "supersecreta")
+        .await
+        .unwrap();
+    bob.verify(&pending_code(&pool, "bob").await).await.unwrap();
+    laptop.connect().await.unwrap();
+    bob.connect().await.unwrap();
+
+    laptop.request_contact("bob").await.unwrap();
+    bob.accept_contact("alice").await.unwrap();
+
+    // Alice signs in on a second device without taking over the first.
+    let phone = HushClient::spawn(dir.join("phone.db"));
+    phone.login(&base, "alice", "supersecreta").await.unwrap();
+    phone.connect().await.unwrap();
+
+    // Bob writes once; both of Alice's devices receive their own copy.
+    bob.send_text("alice", "os veo a los dos").await.unwrap();
+    wait_for_text(&laptop, "bob", "os veo a los dos").await;
+    wait_for_text(&phone, "bob", "os veo a los dos").await;
+
+    // What Alice writes on one device shows up on the other, on her side of
+    // the conversation, and reaches Bob.
+    laptop.send_text("bob", "escribo desde el portátil").await.unwrap();
+    wait_for_text(&bob, "alice", "escribo desde el portátil").await;
+    wait_for_text(&phone, "bob", "escribo desde el portátil").await;
+    assert!(
+        phone
+            .history("bob")
+            .await
+            .unwrap()
+            .iter()
+            .find(|m| m.text == "escribo desde el portátil")
+            .expect("the copy is there")
+            .mine,
+        "a message we wrote elsewhere is still ours"
+    );
+
+    // And the older device keeps working after the newer one joined.
+    phone.send_text("bob", "y desde el teléfono").await.unwrap();
+    wait_for_text(&bob, "alice", "y desde el teléfono").await;
+    wait_for_text(&laptop, "bob", "y desde el teléfono").await;
 }
 
 /// Blocking someone, lifting the block and adding them again has to leave a
@@ -407,36 +466,36 @@ async fn encrypted_roundtrip_with_offline_delivery() {
     // Alice establishes a PQXDH session from Bob's public bundle and sends
     // while Bob is offline.
     let bundle = alice_api.fetch_bundle("bob").await.unwrap();
-    alice.ensure_session("bob", &bundle).await.unwrap();
-    let envelope = alice.encrypt("bob", b"hola bob, esto es secreto").await.unwrap();
+    alice.ensure_session("bob", 1, &bundle).await.unwrap();
+    let envelope = alice.encrypt("bob", 1, b"hola bob, esto es secreto").await.unwrap();
     assert!(!envelope.contains("secreto"), "envelope must not leak plaintext");
-    alice_api.send_message("bob", &envelope).await.unwrap();
+    alice_api.send_message("bob", &[(1, envelope.clone())]).await.unwrap();
 
     // Bob comes online, gets the backlog, decrypts.
     let mut bob_rx = bob_api.stream().await.unwrap();
     let msg = recv_one(&mut bob_rx).await;
     assert_eq!(msg.sender, "alice");
-    let plain = bob.decrypt("alice", &msg.body).await.unwrap();
+    let plain = bob.decrypt("alice", 1, &msg.body).await.unwrap();
     assert_eq!(plain, b"hola bob, esto es secreto");
     bob_api.ack_message(&msg.id).await.unwrap();
 
     // Bob replies over the ratchet established by the prekey message.
-    assert!(bob.has_session("alice").await.unwrap());
-    let envelope = bob.encrypt("alice", b"hola alice, recibido").await.unwrap();
-    bob_api.send_message("alice", &envelope).await.unwrap();
+    assert!(bob.has_session("alice", 1).await.unwrap());
+    let envelope = bob.encrypt("alice", 1, b"hola alice, recibido").await.unwrap();
+    bob_api.send_message("alice", &[(1, envelope.clone())]).await.unwrap();
 
     let mut alice_rx = alice_api.stream().await.unwrap();
     let msg = recv_one(&mut alice_rx).await;
     assert_eq!(msg.sender, "bob");
-    let plain = alice.decrypt("bob", &msg.body).await.unwrap();
+    let plain = alice.decrypt("bob", 1, &msg.body).await.unwrap();
     assert_eq!(plain, b"hola alice, recibido");
     alice_api.ack_message(&msg.id).await.unwrap();
 
     // A second message from Alice uses the ratchet (no prekey consumption).
-    let envelope = alice.encrypt("bob", b"segundo mensaje").await.unwrap();
+    let envelope = alice.encrypt("bob", 1, b"segundo mensaje").await.unwrap();
     assert!(envelope.contains("\"signal\""), "ratchet messages use type signal");
-    alice_api.send_message("bob", &envelope).await.unwrap();
+    alice_api.send_message("bob", &[(1, envelope.clone())]).await.unwrap();
     let msg = recv_one(&mut bob_rx).await;
-    let plain = bob.decrypt("alice", &msg.body).await.unwrap();
+    let plain = bob.decrypt("alice", 1, &msg.body).await.unwrap();
     assert_eq!(plain, b"segundo mensaje");
 }

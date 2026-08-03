@@ -592,6 +592,16 @@ impl LocalDb {
         })
     }
 
+    /// Which of the account's devices this installation is, once the server
+    /// has assigned it one.
+    pub fn device_id(&self) -> Result<Option<i64>> {
+        Ok(self.meta_get("device_id")?.and_then(|v| v.parse().ok()))
+    }
+
+    pub fn set_device_id(&self, device: i64) -> Result<()> {
+        self.meta_set("device_id", &device.to_string())
+    }
+
     pub fn unread_from(&self, contact: &str) -> Result<Vec<String>> {
         self.with(|c| {
             c.prepare(

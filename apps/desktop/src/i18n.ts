@@ -125,6 +125,20 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "about.license": "Licencia",
     "about.website": "Sitio web",
 
+    "devices.title": "Dispositivos",
+    "devices.note":
+      "Sesiones abiertas en esta cuenta. Revoca cualquiera que no reconozcas: dejará de recibir mensajes al instante.",
+    "devices.thisOne": "este dispositivo",
+    "devices.connected": "conectado",
+    "devices.lastSeen": "últ. vez {when}",
+    "devices.never": "sin usar",
+    "devices.revoke": "Revocar",
+    "devices.revokeTitle": "¿Revocar {name}?",
+    "devices.revokeNote":
+      "Ese dispositivo se desconectará y tendrá que iniciar sesión otra vez para volver a recibir mensajes.",
+    "devices.revoked": "Dispositivo revocado",
+    "devices.failed": "No se pudieron cargar los dispositivos",
+
     "update.title": "Versión {version} disponible",
     "update.note": "Hay una versión nueva de Hush lista para instalar.",
     "update.install": "Actualizar",
@@ -182,6 +196,7 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "err.message_not_found": "Ese mensaje ya no existe",
     "err.not_your_message": "Solo puedes borrar para todos tus propios mensajes",
     "err.payload_too_large": "El contenido es demasiado grande",
+    "err.too_many_devices": "Esta cuenta ya tiene demasiados dispositivos; revoca uno primero",
 
     "ctx.copyText": "Copiar texto",
     "ctx.info": "Información",
@@ -357,6 +372,20 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "about.license": "Licence",
     "about.website": "Website",
 
+    "devices.title": "Devices",
+    "devices.note":
+      "Sessions signed in to this account. Revoke anything you do not recognise: it stops receiving messages at once.",
+    "devices.thisOne": "this device",
+    "devices.connected": "connected",
+    "devices.lastSeen": "last seen {when}",
+    "devices.never": "never used",
+    "devices.revoke": "Revoke",
+    "devices.revokeTitle": "Revoke {name}?",
+    "devices.revokeNote":
+      "That device will be disconnected and will have to sign in again before it receives messages.",
+    "devices.revoked": "Device revoked",
+    "devices.failed": "Could not load the devices",
+
     "update.title": "Version {version} available",
     "update.note": "A new version of Hush is ready to install.",
     "update.install": "Update",
@@ -414,6 +443,7 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "err.message_not_found": "That message no longer exists",
     "err.not_your_message": "You can only delete your own messages for everyone",
     "err.payload_too_large": "That content is too large",
+    "err.too_many_devices": "This account already has too many devices; revoke one first",
 
     "ctx.copyText": "Copy text",
     "ctx.info": "Info",

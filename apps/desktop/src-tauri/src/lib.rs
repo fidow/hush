@@ -160,6 +160,20 @@ async fn connect(
                 ClientEvent::MessageDeleted { id } => {
                     let _ = app.emit("hush://deleted", serde_json::json!({ "id": id }));
                 }
+                // Written on another device of this account: same shape as an
+                // incoming message, but ours.
+                ClientEvent::OwnMessage(msg) => {
+                    let _ = app.emit(
+                        "hush://own-message",
+                        serde_json::json!({
+                            "id": msg.id,
+                            "contact": msg.sender,
+                            "kind": msg.kind,
+                            "text": msg.text,
+                            "created_at": msg.created_at,
+                        }),
+                    );
+                }
                 ClientEvent::MessageResent { old_id, new_id } => {
                     let _ = app.emit(
                         "hush://resent",
@@ -315,6 +329,18 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+/// The devices signed in to this account, so the user can revoke one.
+#[tauri::command]
+async fn get_devices(client: State<'_, HushClient>) -> Result<Vec<serde_json::Value>, String> {
+    client.devices().await
+}
+
+/// Signs a device out for good.
+#[tauri::command]
+async fn revoke_device(client: State<'_, HushClient>, device: i64) -> Result<(), String> {
+    client.revoke_device(device).await
+}
+
 /// Shows a desktop notification under Hush's own identity.
 ///
 /// The notification plugin only registers that identity for an installed
@@ -412,7 +438,9 @@ pub fn run() {
             forgot_password,
             reset_password,
             idle_seconds,
-            notify
+            notify,
+            get_devices,
+            revoke_device
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -781,6 +781,7 @@ $("#settings-btn").addEventListener("click", () => {
   ($("#settings-alias") as HTMLInputElement).value = myAlias;
   ($("#settings-lang") as HTMLSelectElement).value = lang();
   void fillAbout();
+  void renderDevices();
   ($("#settings-notifications") as HTMLInputElement).checked = notificationsEnabled();
   ($("#settings-sound") as HTMLInputElement).checked = soundEnabled();
   ($("#settings-tray") as HTMLInputElement).checked = closeToTray();
@@ -813,6 +814,77 @@ $("#about-website").addEventListener("click", (e) => {
   e.preventDefault();
   void openUrl(WEBSITE);
 });
+
+// ---- Dispositivos ----
+
+interface DeviceEntry {
+  id: number;
+  name: string;
+  last_seen: number | null;
+  current: boolean;
+  connected: boolean;
+}
+
+/// Lists the devices signed in to this account, each with a way to revoke it.
+async function renderDevices() {
+  const list = $("#device-list");
+  list.replaceChildren();
+  let devices: DeviceEntry[];
+  try {
+    devices = await invoke<DeviceEntry[]>("get_devices");
+  } catch {
+    const li = document.createElement("li");
+    li.className = "hint";
+    li.textContent = t("devices.failed");
+    list.appendChild(li);
+    return;
+  }
+
+  for (const device of devices) {
+    const li = document.createElement("li");
+    const label = document.createElement("div");
+    const name = document.createElement("strong");
+    name.textContent = device.name || `#${device.id}`;
+    const detail = document.createElement("small");
+    detail.textContent = device.current
+      ? t("devices.thisOne")
+      : device.connected
+        ? t("devices.connected")
+        : device.last_seen
+          ? t("devices.lastSeen").replace("{when}", clockTime(device.last_seen))
+          : t("devices.never");
+    label.appendChild(name);
+    label.appendChild(detail);
+    li.appendChild(label);
+
+    // Revoking the device you are using is just signing out, so it is left to
+    // the other devices to do.
+    if (!device.current) {
+      const revoke = document.createElement("button");
+      revoke.type = "button";
+      revoke.className = "secondary";
+      revoke.textContent = t("devices.revoke");
+      revoke.addEventListener("click", () => {
+        askConfirm(
+          t("devices.revokeTitle").replace("{name}", device.name || `#${device.id}`),
+          t("devices.revokeNote"),
+          t("devices.revoke"),
+          async () => {
+            try {
+              await invoke("revoke_device", { device: device.id });
+              toast(t("devices.revoked"));
+              void renderDevices();
+            } catch (e) {
+              toast(tError(e));
+            }
+          },
+        );
+      });
+      li.appendChild(revoke);
+    }
+    list.appendChild(li);
+  }
+}
 
 // Alert switches apply immediately; the sound one previews itself so the
 // user hears what they just turned on.
@@ -1150,6 +1222,25 @@ listen<{ id: string; sender: string; kind: string; text: string; created_at: num
         payload.kind === "image" ? t("notify.image") : payload.text.slice(0, 120);
       void alertUser(who, preview);
     }
+  },
+);
+
+// Written on another device of this account: it belongs in that conversation
+// on our side, and needs no alert — we wrote it.
+listen<{ id: string; contact: string; kind: string; text: string; created_at: number }>(
+  "hush://own-message",
+  ({ payload }) => {
+    addMessage(payload.contact, {
+      id: payload.id,
+      sender: payload.contact,
+      kind: payload.kind,
+      text: payload.text,
+      created_at: payload.created_at,
+      state: "sent",
+      delivered_at: null,
+      read_at: null,
+      mine: true,
+    });
   },
 );
 

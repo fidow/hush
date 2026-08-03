@@ -99,6 +99,19 @@ available again from settings. It is deliberately separate from the login
 password, which the server does see during authentication. Losing it means
 losing the archive — there is no recovery path by design.
 
+### Several devices at once
+
+An account can hold up to four devices, each with its own identity, prekeys,
+ratchet sessions and delivery queue — nothing private is shared between them.
+Sending encrypts the message once per device of the recipient *and* once per
+other device of the sender, so every device shows the same conversation; the
+server carries several copies of something it still cannot read. Each device
+acknowledges its own copy, and a device is revoked from settings, which drops
+its token, its queue and its keys.
+
+A client that predates this talks to the account's first device, so old and new
+clients keep working against the same server.
+
 ### Updates
 
 The client checks `/v1/update/{target}/{arch}/{version}` on start and offers

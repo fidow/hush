@@ -23,6 +23,8 @@ pub enum ClientEvent {
     /// A message was sent again after rebuilding a session, so it now travels
     /// under a different id.
     MessageResent { old_id: String, new_id: String },
+    /// Something we wrote on another device of this account.
+    OwnMessage(DecryptedMessage),
     /// The contact list changed (a request arrived, was accepted, …).
     ContactsChanged,
     /// One of our messages was delivered or read.
@@ -46,6 +48,29 @@ fn encode_content(kind: &str, content: &str) -> Vec<u8> {
     serde_json::json!({ "kind": kind, "content": content })
         .to_string()
         .into_bytes()
+}
+
+/// A copy of an outgoing message for our own other devices: they need to know
+/// who it was for, since the envelope only says it came from us.
+fn encode_sync(to: &str, kind: &str, content: &str) -> String {
+    serde_json::json!({ "to": to, "kind": kind, "content": content }).to_string()
+}
+
+fn decode_sync(content: &str) -> Option<(String, String, String)> {
+    let v: serde_json::Value = serde_json::from_str(content).ok()?;
+    Some((
+        v["to"].as_str()?.to_string(),
+        v["kind"].as_str()?.to_string(),
+        v["content"].as_str()?.to_string(),
+    ))
+}
+
+/// A name for this device in the account's device list. Nothing sensitive:
+/// the computer's name is what makes one device recognisable from another.
+fn device_name() -> String {
+    std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_default()
 }
 
 fn decode_content(plain: &[u8]) -> (String, String) {
@@ -147,6 +172,14 @@ enum Command {
     },
     Contacts {
         reply: oneshot::Sender<Result<Vec<ContactEntry>, String>>,
+    },
+    /// The devices signed in to this account.
+    Devices {
+        reply: oneshot::Sender<Result<Vec<serde_json::Value>, String>>,
+    },
+    RevokeDevice {
+        device: i64,
+        reply: oneshot::Sender<Result<(), String>>,
     },
     History {
         contact: String,
@@ -377,6 +410,17 @@ impl HushClient {
             .await
     }
 
+    /// The devices signed in to this account.
+    pub async fn devices(&self) -> Result<Vec<serde_json::Value>, String> {
+        self.request(|reply| Command::Devices { reply }).await
+    }
+
+    /// Signs a device out for good.
+    pub async fn revoke_device(&self, device: i64) -> Result<(), String> {
+        self.request(|reply| Command::RevokeDevice { device, reply })
+            .await
+    }
+
     /// Deletes a message. With `for_everyone` the other side is asked to
     /// delete their copy as well.
     pub async fn delete_message(&self, id: &str, for_everyone: bool) -> Result<(), String> {
@@ -453,6 +497,8 @@ struct Actor {
 
 /// How long to wait before rebuilding the session with the same contact again.
 const REPAIR_INTERVAL_MS: i64 = 60_000;
+/// Devices an account may have, matching the server's own limit.
+const MAX_DEVICES: u32 = 4;
 
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -477,7 +523,7 @@ impl Actor {
         // The history key is random, never derived from anything the user
         // typed, and shown to them later as a recovery code.
         let archive_key = ArchiveKey::generate();
-        let engine = Engine::open(self.db.clone(), username)?;
+        let engine = Engine::open(self.db.clone(), username, 1)?;
         let mut api = ApiClient::new(server.trim_end_matches('/'));
         let dev_code = api
             .register(
@@ -617,9 +663,15 @@ impl Actor {
             self.archive_key = None;
         }
 
-        let mut engine = Engine::open(self.db.clone(), username)?;
+        // A device that already belongs to this account keeps its number, its
+        // queue and its sessions; anything else joins as a new one.
+        let known_device = if same_account { self.db.device_id()? } else { None };
         let mut api = ApiClient::new(server);
-        api.login(username, password).await?;
+        let device = api
+            .login(username, password, known_device, &device_name())
+            .await?;
+        self.db.set_device_id(device)?;
+        let mut engine = Engine::open(self.db.clone(), username, device as u32)?;
 
         if !same_account {
             // Fresh keys for this device; publishing them also updates our
@@ -668,7 +720,8 @@ impl Actor {
             .profile()?
             .ok_or_else(|| anyhow::anyhow!("no account on this device"))?;
         if self.session.is_none() {
-            let engine = Engine::open(self.db.clone(), &profile.username)?;
+            let device = self.db.device_id()?.unwrap_or(1);
+            let engine = Engine::open(self.db.clone(), &profile.username, device as u32)?;
             let mut api = ApiClient::new(&profile.server);
             api.set_token(&profile.token);
             self.session = Some(Session { engine, api });
@@ -718,9 +771,13 @@ impl Actor {
         self.repairs.insert(peer.to_string(), now);
 
         if let Some(session) = self.session.as_mut() {
-            if let Err(e) = session.engine.reset_session(peer) {
-                tracing::warn!("cannot drop the stale session with {peer}: {e}");
-                return;
+            // Every device of theirs: we cannot tell which one we can no
+            // longer read, and rebuilding all of them is harmless.
+            for device in 1..=MAX_DEVICES {
+                if let Err(e) = session.engine.reset_session(peer, device) {
+                    tracing::warn!("cannot drop the stale session with {peer}/{device}: {e}");
+                    return;
+                }
             }
         }
         tracing::info!("rebuilding the session with {peer} after an unreadable message");
@@ -738,32 +795,59 @@ impl Actor {
         kind: &str,
         content: &str,
     ) -> anyhow::Result<String> {
+        let payload = encode_content(kind, content);
         let session = self
             .session
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("no session; log in first"))?;
 
-        // Detect a contact who re-provisioned keys (e.g. new device): their
-        // published identity no longer matches the one we have on record.
         let remote = session.api.fetch_profile(recipient).await?;
-        if let Some(known) = session.engine.known_identity_b64(recipient).await? {
-            if !remote.identity_key.is_empty() && known != remote.identity_key {
-                tracing::info!("identity of {recipient} changed; renegotiating session");
-                session.engine.reset_session(recipient)?;
+        let envelopes = Self::encrypt_for_devices(session, recipient, &payload).await?;
+        let id = session.api.send_message(recipient, &envelopes).await?;
+        self.db.upsert_contact(recipient, &remote.alias, "accepted")?;
+
+        // Our own other devices show the same conversation, so they get a copy
+        // of what we just wrote, encrypted for each of them in turn.
+        let me = session.engine.username().to_string();
+        let sync = encode_content("sync", &encode_sync(recipient, kind, content));
+        if let Ok(copies) = Self::encrypt_for_devices(session, &me, &sync).await {
+            if !copies.is_empty() {
+                if let Err(e) = session.api.send_message(&me, &copies).await {
+                    tracing::warn!("cannot mirror the message to our own devices: {e}");
+                }
             }
         }
-        if !session.engine.has_session(recipient).await? {
-            let bundle = session.api.fetch_bundle(recipient).await?;
-            session.engine.ensure_session(recipient, &bundle).await?;
-        }
-
-        let envelope = session
-            .engine
-            .encrypt(recipient, &encode_content(kind, content))
-            .await?;
-        let id = session.api.send_message(recipient, &envelope).await?;
-        self.db.upsert_contact(recipient, &remote.alias, "accepted")?;
         Ok(id)
+    }
+
+    /// Encrypts `payload` once per device of `peer`, establishing sessions and
+    /// renegotiating any device whose identity changed.
+    async fn encrypt_for_devices(
+        session: &mut Session,
+        peer: &str,
+        payload: &[u8],
+    ) -> anyhow::Result<Vec<(i64, String)>> {
+        let bundles = session.api.fetch_bundles(peer).await?;
+        let mut envelopes = Vec::new();
+        for (device, bundle) in bundles {
+            let device_u32 = device as u32;
+            // A device that re-provisioned its keys publishes a new identity;
+            // the session we hold for it is then unusable.
+            if let (Some(known), Some(published)) = (
+                session.engine.known_identity_b64(peer, device_u32).await?,
+                bundle["identity_key"].as_str(),
+            ) {
+                if !published.is_empty() && known != published {
+                    tracing::info!("identity of {peer}/{device} changed; renegotiating");
+                    session.engine.reset_session(peer, device_u32)?;
+                }
+            }
+            if !session.engine.has_session(peer, device_u32).await? {
+                session.engine.ensure_session(peer, device_u32, &bundle).await?;
+            }
+            envelopes.push((device, session.engine.encrypt(peer, device_u32, payload).await?));
+        }
+        Ok(envelopes)
     }
 
     async fn handle_send(
@@ -921,20 +1005,64 @@ impl Actor {
             .map_err(|e| e.to_string())
     }
 
+    /// Files a message another of our devices sent, so every device shows the
+    /// same conversation. It is ours, and already on its way, so it carries
+    /// the same id and the same "sent" state as on the device that wrote it.
+    fn store_own_copy(&mut self, msg: &IncomingMessage, content: &str) -> Option<StoredMessage> {
+        let (to, kind, text) = decode_sync(content)?;
+        if Self::is_control(&kind) {
+            return None;
+        }
+        let stored = StoredMessage {
+            id: msg.id.clone(),
+            contact: to,
+            mine: true,
+            kind,
+            text,
+            state: "sent".to_string(),
+            delivered_at: None,
+            read_at: None,
+            created_at: msg.created_at,
+        };
+        if let Err(e) = self.db.add_message(&stored) {
+            tracing::warn!("cannot store our own message from another device: {e}");
+            return None;
+        }
+        if let Some(events) = &self.events {
+            let _ = events.try_send(ClientEvent::OwnMessage(DecryptedMessage {
+                id: stored.id.clone(),
+                sender: stored.contact.clone(),
+                kind: stored.kind.clone(),
+                text: stored.text.clone(),
+                created_at: stored.created_at,
+            }));
+        }
+        // Archived by the device that sent it; a second copy would be the same
+        // entry under the same id.
+        None
+    }
+
     /// Returns the stored message so the caller can archive it once the
     /// session borrow is released.
     async fn handle_incoming(&mut self, msg: IncomingMessage) -> Option<StoredMessage> {
         let session = self.session.as_mut()?;
-        match session.engine.decrypt(&msg.sender, &msg.body).await {
+        let device = msg.sender_device as u32;
+        match session.engine.decrypt(&msg.sender, device, &msg.body).await {
             Ok(plain) => {
                 let _ = session.api.ack_message(&msg.id).await;
                 let (kind, text) = decode_content(&plain);
+
+                // A copy of something we wrote on another device: it belongs
+                // in that conversation, on our side of it.
+                if kind == "sync" {
+                    return self.store_own_copy(&msg, &text);
+                }
 
                 // Decrypting it already adopted the sender's new session, so
                 // what we send next is readable on their side — including
                 // whatever they never managed to receive.
                 if kind == "rekey" {
-                    tracing::info!("{} rebuilt the session with us", msg.sender);
+                    tracing::info!("{}/{} rebuilt the session with us", msg.sender, device);
                     let sender = msg.sender.clone();
                     self.resend_undelivered(&sender).await;
                     return None;
@@ -1002,7 +1130,12 @@ impl Actor {
                 Some(stored)
             }
             Err(e) => {
-                tracing::warn!("failed to decrypt message {} from {}: {e}", msg.id, msg.sender);
+                tracing::warn!(
+                    "failed to decrypt message {} from {}/{}: {e}",
+                    msg.id,
+                    msg.sender,
+                    device
+                );
                 // Drop it rather than acknowledge it: it would otherwise be
                 // redelivered forever, but telling the sender it arrived would
                 // also stop them from sending it again once we can read them.
@@ -1163,6 +1296,20 @@ async fn actor(db_path: PathBuf, mut commands: mpsc::Receiver<Command>) {
                 }
                 Some(Command::Contacts { reply }) => {
                     let _ = reply.send(actor.contacts().await);
+                }
+                Some(Command::Devices { reply }) => {
+                    let result = match actor.session.as_ref() {
+                        None => Err("no_session".to_string()),
+                        Some(s) => s.api.list_devices().await.map_err(|e| e.to_string()),
+                    };
+                    let _ = reply.send(result);
+                }
+                Some(Command::RevokeDevice { device, reply }) => {
+                    let result = match actor.session.as_ref() {
+                        None => Err("no_session".to_string()),
+                        Some(s) => s.api.revoke_device(device).await.map_err(|e| e.to_string()),
+                    };
+                    let _ = reply.send(result);
                 }
                 Some(Command::History { contact, reply }) => {
                     let _ = reply.send(actor.db.history(&contact).map_err(|e| e.to_string()));

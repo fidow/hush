@@ -516,6 +516,30 @@ button.mini {
   overflow-wrap: anywhere;
 }
 
+.device-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin: 0 0 0.8rem;
+  padding: 0;
+}
+
+.device-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+  padding: 0.5rem 0.7rem;
+  border-radius: 10px;
+  background: var(--panel);
+}
+
+.device-list small {
+  display: block;
+  color: var(--muted);
+}
+
 /* Time and ticks sit together at the bottom right of the bubble. Muted by
    colour rather than opacity, so a read tick can still show full strength. */
 .bubble .meta {

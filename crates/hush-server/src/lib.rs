@@ -25,6 +25,9 @@ const MAX_FIELD_BYTES: usize = 64 * 1024;
 const MAX_ALIAS_BYTES: usize = 64;
 /// Encrypted envelopes carrying inline images can be several MB.
 const MAX_BODY_BYTES: usize = 15 * 1024 * 1024;
+/// Devices one account may have signed in at once. Every message is encrypted
+/// once per device, so this also caps the work a single send costs.
+const MAX_DEVICES: i64 = 4;
 /// Contact requests one account may send per hour, and how many of those may
 /// name someone who does not exist.
 const MAX_CONTACT_REQUESTS_PER_HOUR: usize = 20;
@@ -77,18 +80,41 @@ CREATE TABLE IF NOT EXISTS accounts (
     bundle_static   TEXT,
     created_at      INTEGER NOT NULL
 );
+-- One row per device signed in to an account. Each holds its own identity and
+-- ratchet material: a message is encrypted separately for every device, so
+-- nothing private is ever shared between them.
+CREATE TABLE IF NOT EXISTS devices (
+    username        TEXT NOT NULL REFERENCES accounts(username),
+    id              INTEGER NOT NULL,
+    name            TEXT NOT NULL DEFAULT '',
+    token           TEXT NOT NULL UNIQUE,
+    registration_id INTEGER NOT NULL,
+    identity_key    TEXT NOT NULL,
+    bundle_static   TEXT,
+    last_seen       INTEGER,
+    created_at      INTEGER NOT NULL,
+    PRIMARY KEY (username, id)
+);
 CREATE TABLE IF NOT EXISTS one_time_prekeys (
     id       INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT NOT NULL REFERENCES accounts(username),
+    device   INTEGER NOT NULL DEFAULT 1,
     kind     TEXT NOT NULL CHECK (kind IN ('ec', 'kyber')),
     data     TEXT NOT NULL
 );
+-- A fanned-out message keeps one id across every copy, so the sender tracks a
+-- single message while each device acknowledges its own.
 CREATE TABLE IF NOT EXISTS messages (
-    id         TEXT PRIMARY KEY,
-    sender     TEXT NOT NULL,
-    recipient  TEXT NOT NULL REFERENCES accounts(username),
-    body       TEXT NOT NULL,
-    created_at INTEGER NOT NULL
+    id               TEXT NOT NULL,
+    recipient_device INTEGER NOT NULL DEFAULT 1,
+    sender           TEXT NOT NULL,
+    -- Which device wrote it: the recipient needs it to pick the session the
+    -- message was encrypted for.
+    sender_device    INTEGER NOT NULL DEFAULT 1,
+    recipient        TEXT NOT NULL REFERENCES accounts(username),
+    body             TEXT NOT NULL,
+    created_at       INTEGER NOT NULL,
+    PRIMARY KEY (id, recipient_device)
 );
 CREATE INDEX IF NOT EXISTS idx_messages_recipient ON messages(recipient, created_at);
 -- Client-side encrypted history. The server stores opaque blobs and can
@@ -130,6 +156,8 @@ CREATE TABLE IF NOT EXISTS contacts (
 pub struct OutMessage {
     pub id: String,
     pub sender: String,
+    /// The sender's device, so the recipient decrypts with the right session.
+    pub sender_device: i64,
     pub body: String,
     pub created_at: i64,
 }
@@ -155,7 +183,32 @@ struct Listener {
     tx: mpsc::Sender<Push>,
 }
 
-type LiveMap = Arc<Mutex<HashMap<String, Listener>>>;
+/// Live streams, one entry per connected device: `(username, device)`.
+type LiveMap = Arc<Mutex<HashMap<(String, i64), Listener>>>;
+
+/// Everything the account has open right now. Presence is per account, but a
+/// message goes to one device and a receipt to all of them.
+async fn listeners_for(live: &LiveMap, username: &str) -> Vec<mpsc::Sender<Push>> {
+    live.lock()
+        .await
+        .iter()
+        .filter(|((user, _), _)| user == username)
+        .map(|(_, listener)| listener.tx.clone())
+        .collect()
+}
+
+/// True while any device of the account holds an open stream.
+async fn is_connected(live: &LiveMap, username: &str) -> bool {
+    live.lock().await.keys().any(|(user, _)| user == username)
+}
+
+/// Tells every device of `username` about something that concerns the account
+/// rather than one device.
+async fn push_to_account(live: &LiveMap, username: &str, push: Push) {
+    for tx in listeners_for(live, username).await {
+        let _ = tx.try_send(push.clone());
+    }
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -186,6 +239,26 @@ pub async fn connect_db(url: &str) -> anyhow::Result<SqlitePool> {
             .execute(&pool)
             .await;
     }
+
+    // Per-device columns, added with multi-device support. Existing rows
+    // belong to device 1, which is the account's first device below.
+    let _ = sqlx::query("ALTER TABLE one_time_prekeys ADD COLUMN device INTEGER NOT NULL DEFAULT 1")
+        .execute(&pool)
+        .await;
+    migrate_messages_to_devices(&pool).await?;
+    // Every account that predates devices becomes its own first device,
+    // keeping the token it already had so signed-in clients stay signed in.
+    sqlx::query(
+        "INSERT INTO devices
+             (username, id, name, token, registration_id, identity_key, bundle_static,
+              last_seen, created_at)
+         SELECT username, 1, '', token, registration_id, identity_key, bundle_static,
+                last_seen, created_at
+         FROM accounts
+         WHERE NOT EXISTS (SELECT 1 FROM devices WHERE devices.username = accounts.username)",
+    )
+    .execute(&pool)
+    .await?;
 
     // Blocking added a contact state, and the original table pinned the
     // allowed values with a CHECK. SQLite cannot drop a constraint, so the
@@ -219,6 +292,45 @@ pub async fn connect_db(url: &str) -> anyhow::Result<SqlitePool> {
     Ok(pool)
 }
 
+/// Adds the recipient device to the queue. The table keyed messages by id
+/// alone, which cannot hold one message fanned out to several devices, and
+/// SQLite cannot change a primary key in place.
+async fn migrate_messages_to_devices(pool: &SqlitePool) -> anyhow::Result<()> {
+    let columns: Vec<String> = sqlx::query("PRAGMA table_info(messages)")
+        .fetch_all(pool)
+        .await?
+        .iter()
+        .map(|r| r.get::<String, _>(1))
+        .collect();
+    if columns.iter().any(|c| c == "recipient_device") {
+        return Ok(());
+    }
+    tracing::info!("migrating the message queue to per-device delivery");
+    sqlx::raw_sql(
+        "BEGIN;
+         CREATE TABLE messages_migrated (
+             id               TEXT NOT NULL,
+             recipient_device INTEGER NOT NULL DEFAULT 1,
+             sender           TEXT NOT NULL,
+             sender_device    INTEGER NOT NULL DEFAULT 1,
+             recipient        TEXT NOT NULL REFERENCES accounts(username),
+             body             TEXT NOT NULL,
+             created_at       INTEGER NOT NULL,
+             PRIMARY KEY (id, recipient_device)
+         );
+         INSERT INTO messages_migrated
+                 (id, recipient_device, sender, sender_device, recipient, body, created_at)
+             SELECT id, 1, sender, 1, recipient, body, created_at FROM messages;
+         DROP TABLE messages;
+         ALTER TABLE messages_migrated RENAME TO messages;
+         CREATE INDEX IF NOT EXISTS idx_messages_recipient ON messages(recipient, created_at);
+         COMMIT;",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 pub fn app(db: SqlitePool) -> Router {
     let state = AppState {
         db,
@@ -245,6 +357,9 @@ pub fn app(db: SqlitePool) -> Router {
         .route("/v1/contacts/{peer}/block", post(block_contact))
         .route("/v1/keys", put(upload_keys))
         .route("/v1/keys/{username}", get(fetch_bundle))
+        .route("/v1/keys/{username}/devices", get(fetch_bundles))
+        .route("/v1/devices", get(list_devices))
+        .route("/v1/devices/{device}", axum::routing::delete(revoke_device))
         .route("/v1/messages/stream", get(message_stream))
         .route("/v1/messages/{target}", put(send_message).delete(ack_message))
         .route("/v1/messages/{id}/read", post(mark_read))
@@ -431,6 +546,9 @@ async fn landing(parts: axum::http::HeaderMap) -> axum::response::Html<String> {
 /// Authenticated user, resolved from the `Authorization: Bearer <token>` header.
 pub struct AuthUser {
     pub username: String,
+    /// Which of the account's devices is calling. Every queue, prekey and
+    /// session belongs to a device, not to the account.
+    pub device: i64,
 }
 
 impl FromRequestParts<AppState> for AuthUser {
@@ -443,14 +561,20 @@ impl FromRequestParts<AppState> for AuthUser {
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "))
             .ok_or_else(unauthorized)?;
-        let row = sqlx::query("SELECT username FROM accounts WHERE token = ? AND verified = 1")
-            .bind(token)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(internal)?
-            .ok_or_else(unauthorized)?;
+        let row = sqlx::query(
+            "SELECT d.username, d.id
+             FROM devices d
+             JOIN accounts a ON a.username = d.username
+             WHERE d.token = ? AND a.verified = 1",
+        )
+        .bind(token)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(internal)?
+        .ok_or_else(unauthorized)?;
         Ok(AuthUser {
             username: row.get(0),
+            device: row.get(1),
         })
     }
 }
@@ -587,6 +711,26 @@ async fn register(
         }
     }
 
+    // The account's first device, holding the identity just published. A
+    // leftover unverified registration starts over, devices included.
+    sqlx::query("DELETE FROM devices WHERE username = ?")
+        .bind(&username)
+        .execute(&state.db)
+        .await
+        .map_err(internal)?;
+    sqlx::query(
+        "INSERT INTO devices (username, id, token, registration_id, identity_key, created_at)
+         VALUES (?, 1, ?, ?, ?, ?)",
+    )
+    .bind(&username)
+    .bind(&token)
+    .bind(req.registration_id)
+    .bind(&req.identity_key)
+    .bind(now())
+    .execute(&state.db)
+    .await
+    .map_err(internal)?;
+
     // The address is not logged: it is the one piece of an account that ties
     // it to a person outside Hush.
     tracing::info!(username = %username, "account created, pending verification");
@@ -708,6 +852,15 @@ async fn verify_account(
 struct LoginRequest {
     username: String,
     password: String,
+    /// The device signing in again, keeping its queue and its sessions.
+    device_id: Option<i64>,
+    /// Set by a client with no device of its own yet, so the account gains
+    /// one instead of taking over the first.
+    #[serde(default)]
+    new_device: bool,
+    /// Shown when reviewing or revoking devices.
+    #[serde(default)]
+    device_name: String,
 }
 
 /// Argon2 hash of an unguessable value, used to equalise the cost of logging
@@ -774,8 +927,150 @@ async fn login(
         ));
     }
     state.limits.reset(&format!("login:{username}"));
-    tracing::info!(username = %username, "login succeeded");
-    Ok(Json(serde_json::json!({ "token": row.get::<String, _>(0) })))
+
+    // Which device is this? A client that knows its own keeps it, one that
+    // says it is new gets a fresh id, and anything else — a client from
+    // before devices existed — is the account's first.
+    let device = match (req.device_id, req.new_device) {
+        (Some(id), _) => {
+            let known = sqlx::query("SELECT 1 FROM devices WHERE username = ? AND id = ?")
+                .bind(&username)
+                .bind(id)
+                .fetch_optional(&state.db)
+                .await
+                .map_err(internal)?;
+            // Revoked while it was away: it comes back as a new device.
+            if known.is_some() {
+                id
+            } else {
+                next_device_id(&state.db, &username).await?
+            }
+        }
+        (None, true) => next_device_id(&state.db, &username).await?,
+        (None, false) => 1,
+    };
+
+    // A new token every time, so a password change or a device swap does not
+    // leave an old one working.
+    let token = new_token();
+    sqlx::query(
+        "INSERT INTO devices (username, id, name, token, registration_id, identity_key, created_at)
+         VALUES (?, ?, ?, ?, 0, '', ?)
+         ON CONFLICT(username, id) DO UPDATE SET
+             token = excluded.token,
+             name = CASE WHEN excluded.name = '' THEN devices.name ELSE excluded.name END",
+    )
+    .bind(&username)
+    .bind(device)
+    .bind(req.device_name.chars().take(64).collect::<String>())
+    .bind(&token)
+    .bind(now())
+    .execute(&state.db)
+    .await
+    .map_err(internal)?;
+    // Clients that predate devices read the account's token.
+    if device == 1 {
+        sqlx::query("UPDATE accounts SET token = ? WHERE username = ?")
+            .bind(&token)
+            .bind(&username)
+            .execute(&state.db)
+            .await
+            .map_err(internal)?;
+    }
+
+    tracing::info!(username = %username, device, "login succeeded");
+    Ok(Json(serde_json::json!({ "token": token, "device_id": device })))
+}
+
+/// The lowest free device number for an account. Signal addresses a device
+/// with a single byte, so numbers are reused once a device is revoked rather
+/// than counting upwards forever.
+async fn next_device_id(db: &SqlitePool, username: &str) -> Result<i64, ApiError> {
+    let taken: Vec<i64> = sqlx::query("SELECT id FROM devices WHERE username = ? ORDER BY id")
+        .bind(username)
+        .fetch_all(db)
+        .await
+        .map_err(internal)?
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    (1..=MAX_DEVICES)
+        .find(|id| !taken.contains(id))
+        .ok_or_else(|| {
+            err(
+                StatusCode::CONFLICT,
+                "too_many_devices",
+                "This account has too many devices; revoke one first",
+            )
+        })
+}
+
+/// Records that a device was seen, for the device list.
+async fn touch_device(db: &SqlitePool, username: &str, device: i64) {
+    let _ = sqlx::query("UPDATE devices SET last_seen = ? WHERE username = ? AND id = ?")
+        .bind(now())
+        .bind(username)
+        .bind(device)
+        .execute(db)
+        .await;
+}
+
+/// The account's devices, so the user can see what is signed in and revoke
+/// anything they do not recognise.
+async fn list_devices(
+    auth: AuthUser,
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let rows = sqlx::query(
+        "SELECT id, name, last_seen, created_at FROM devices WHERE username = ? ORDER BY id",
+    )
+    .bind(&auth.username)
+    .fetch_all(&state.db)
+    .await
+    .map_err(internal)?;
+    let online = state.live.lock().await;
+    let devices: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|r| {
+            let id: i64 = r.get(0);
+            serde_json::json!({
+                "id": id,
+                "name": r.get::<String, _>(1),
+                "last_seen": r.get::<Option<i64>, _>(2),
+                "created_at": r.get::<i64, _>(3),
+                "current": id == auth.device,
+                "connected": online.contains_key(&(auth.username.clone(), id)),
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({ "devices": devices })))
+}
+
+/// Revokes a device: its token stops working, its queue goes, and its prekeys
+/// with it. Contacts renegotiate with whatever devices remain.
+async fn revoke_device(
+    auth: AuthUser,
+    State(state): State<AppState>,
+    Path(device): Path<i64>,
+) -> Result<StatusCode, ApiError> {
+    let mut tx = state.db.begin().await.map_err(internal)?;
+    for statement in [
+        "DELETE FROM devices WHERE username = ? AND id = ?",
+        "DELETE FROM one_time_prekeys WHERE username = ? AND device = ?",
+        "DELETE FROM messages WHERE recipient = ? AND recipient_device = ?",
+    ] {
+        sqlx::query(statement)
+            .bind(&auth.username)
+            .bind(device)
+            .execute(&mut *tx)
+            .await
+            .map_err(internal)?;
+    }
+    tx.commit().await.map_err(internal)?;
+    // Drop its stream so the revoked device stops receiving immediately.
+    state.live.lock().await.remove(&(auth.username.clone(), device));
+    tracing::info!(username = %auth.username, device, "device revoked");
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Deserialize)]
@@ -954,7 +1249,7 @@ async fn get_profile(
     .await
     .map_err(internal)?
     .ok_or_else(not_found)?;
-    let connected = state.live.lock().await.contains_key(&username);
+    let connected = is_connected(&state.live, &username).await;
     Ok(Json(serde_json::json!({
         "username": username,
         "alias": row.get::<String, _>(0),
@@ -1020,11 +1315,9 @@ async fn update_me(
     })))
 }
 
-/// Nudges a user's open stream so it re-fetches its contact list.
+/// Nudges a user's open streams so they re-fetch their contact list.
 async fn notify_contacts_changed(state: &AppState, username: &str) {
-    if let Some(listener) = state.live.lock().await.get(username) {
-        let _ = listener.tx.try_send(Push::ContactsChanged);
-    }
+    push_to_account(&state.live, username, Push::ContactsChanged).await;
 }
 
 /// Records that the account was connected at this instant, so a contact who
@@ -1046,12 +1339,9 @@ async fn notify_watchers(db: &SqlitePool, live: &LiveMap, username: &str) {
         .fetch_all(db)
         .await
         .unwrap_or_default();
-    let map = live.lock().await;
     for row in peers {
         let peer: String = row.get(0);
-        if let Some(listener) = map.get(&peer) {
-            let _ = listener.tx.try_send(Push::ContactsChanged);
-        }
+        push_to_account(live, &peer, Push::ContactsChanged).await;
     }
 }
 
@@ -1103,12 +1393,18 @@ async fn list_contacts(
     .await
     .map_err(internal)?;
 
-    let live = state.live.lock().await;
+    let online: std::collections::HashSet<String> = state
+        .live
+        .lock()
+        .await
+        .keys()
+        .map(|(user, _)| user.clone())
+        .collect();
     let contacts: Vec<serde_json::Value> = rows
         .iter()
         .map(|r| {
             let peer: String = r.get(0);
-            let connected = live.contains_key(&peer);
+            let connected = online.contains(&peer);
             serde_json::json!({
                 "username": peer,
                 "state": r.get::<String, _>(1),
@@ -1310,11 +1606,17 @@ async fn query_presence(
     if req.usernames.len() > 500 {
         return Err(bad_request("invalid_request", "Too many usernames"));
     }
-    let live = state.live.lock().await;
+    let online: std::collections::HashSet<String> = state
+        .live
+        .lock()
+        .await
+        .keys()
+        .map(|(user, _)| user.clone())
+        .collect();
     let mut out = serde_json::Map::new();
     for username in &req.usernames {
         let username = username.to_lowercase();
-        let status = if live.contains_key(&username) {
+        let status = if online.contains(&username) {
             sqlx::query("SELECT status FROM accounts WHERE username = ?")
                 .bind(&username)
                 .fetch_optional(&state.db)
@@ -1363,25 +1665,46 @@ async fn upload_keys(
         return Err(bad_request("invalid_keys", "Invalid key material"));
     }
 
+    // Keys belong to the device that uploaded them: every device of an
+    // account has its own identity and its own prekeys.
     let mut tx = state.db.begin().await.map_err(internal)?;
-    sqlx::query("UPDATE accounts SET bundle_static = ? WHERE username = ?")
+    sqlx::query("UPDATE devices SET bundle_static = ? WHERE username = ? AND id = ?")
         .bind(&bundle)
         .bind(&auth.username)
+        .bind(auth.device)
         .execute(&mut *tx)
         .await
         .map_err(internal)?;
     if let (Some(identity_key), Some(registration_id)) = (&req.identity_key, req.registration_id) {
-        sqlx::query("UPDATE accounts SET identity_key = ?, registration_id = ? WHERE username = ?")
+        sqlx::query(
+            "UPDATE devices SET identity_key = ?, registration_id = ? WHERE username = ? AND id = ?",
+        )
+        .bind(identity_key)
+        .bind(registration_id)
+        .bind(&auth.username)
+        .bind(auth.device)
+        .execute(&mut *tx)
+        .await
+        .map_err(internal)?;
+        // Clients that predate devices read the account's copy.
+        if auth.device == 1 {
+            sqlx::query(
+                "UPDATE accounts SET identity_key = ?, registration_id = ?, bundle_static = ?
+                 WHERE username = ?",
+            )
             .bind(identity_key)
             .bind(registration_id)
+            .bind(&bundle)
             .bind(&auth.username)
             .execute(&mut *tx)
             .await
             .map_err(internal)?;
-        tracing::info!(username = %auth.username, "identity re-provisioned (new device)");
+        }
+        tracing::debug!(username = %auth.username, device = auth.device, "device identity published");
     }
-    sqlx::query("DELETE FROM one_time_prekeys WHERE username = ?")
+    sqlx::query("DELETE FROM one_time_prekeys WHERE username = ? AND device = ?")
         .bind(&auth.username)
+        .bind(auth.device)
         .execute(&mut *tx)
         .await
         .map_err(internal)?;
@@ -1389,8 +1712,9 @@ async fn upload_keys(
         if pk.kind != "ec" && pk.kind != "kyber" {
             return Err(bad_request("invalid_keys", "Prekey kind must be ec or kyber"));
         }
-        sqlx::query("INSERT INTO one_time_prekeys (username, kind, data) VALUES (?, ?, ?)")
+        sqlx::query("INSERT INTO one_time_prekeys (username, device, kind, data) VALUES (?, ?, ?, ?)")
             .bind(&auth.username)
+            .bind(auth.device)
             .bind(&pk.kind)
             .bind(&pk.data)
             .execute(&mut *tx)
@@ -1403,6 +1727,7 @@ async fn upload_keys(
 
 #[derive(Serialize)]
 struct BundleResponse {
+    device: i64,
     registration_id: i64,
     identity_key: String,
     bundle_static: serde_json::Value,
@@ -1410,13 +1735,22 @@ struct BundleResponse {
     kyber_prekey: Option<String>,
 }
 
-async fn pop_prekey(db: &SqlitePool, username: &str, kind: &str) -> Result<Option<String>, ApiError> {
+/// Takes a one-time prekey of `kind` belonging to that device. They are meant
+/// to be used once, so it is removed as it is handed out.
+async fn pop_prekey(
+    db: &SqlitePool,
+    username: &str,
+    device: i64,
+    kind: &str,
+) -> Result<Option<String>, ApiError> {
     let row = sqlx::query(
         "DELETE FROM one_time_prekeys
-         WHERE id = (SELECT id FROM one_time_prekeys WHERE username = ? AND kind = ? LIMIT 1)
+         WHERE id = (SELECT id FROM one_time_prekeys
+                     WHERE username = ? AND device = ? AND kind = ? LIMIT 1)
          RETURNING data",
     )
     .bind(username)
+    .bind(device)
     .bind(kind)
     .fetch_optional(db)
     .await
@@ -1424,44 +1758,130 @@ async fn pop_prekey(db: &SqlitePool, username: &str, kind: &str) -> Result<Optio
     Ok(row.map(|r| r.get(0)))
 }
 
+/// Everything needed to start a session with one device.
+async fn bundle_for(
+    db: &SqlitePool,
+    username: &str,
+    device: i64,
+    registration_id: i64,
+    identity_key: String,
+    bundle_static: Option<String>,
+) -> Result<Option<BundleResponse>, ApiError> {
+    // A device that has not published its keys yet cannot be written to.
+    let Some(bundle_static) = bundle_static else {
+        return Ok(None);
+    };
+    Ok(Some(BundleResponse {
+        device,
+        registration_id,
+        identity_key,
+        bundle_static: serde_json::from_str(&bundle_static).map_err(internal)?,
+        one_time_prekey: pop_prekey(db, username, device, "ec").await?,
+        kyber_prekey: pop_prekey(db, username, device, "kyber").await?,
+    }))
+}
+
+/// The bundle of the account's first device, for clients that predate
+/// multiple devices and hold a single session per contact.
 async fn fetch_bundle(
     _auth: AuthUser,
     State(state): State<AppState>,
     Path(username): Path<String>,
 ) -> Result<Json<BundleResponse>, ApiError> {
     let username = username.to_lowercase();
+    let device = primary_device(&state.db, &username).await?;
     let row = sqlx::query(
-        "SELECT registration_id, identity_key, bundle_static FROM accounts WHERE username = ?",
+        "SELECT registration_id, identity_key, bundle_static FROM devices
+         WHERE username = ? AND id = ?",
     )
     .bind(&username)
+    .bind(device)
     .fetch_optional(&state.db)
     .await
     .map_err(internal)?
     .ok_or_else(not_found)?;
 
-    let bundle_static: Option<String> = row.get(2);
-    let bundle_static = bundle_static
-        .ok_or_else(|| {
-            err(
-                StatusCode::NOT_FOUND,
-                "no_keys",
-                "That user cannot receive messages yet",
-            )
-        })?;
+    bundle_for(
+        &state.db,
+        &username,
+        device,
+        row.get(0),
+        row.get(1),
+        row.get(2),
+    )
+    .await?
+    .map(Json)
+    .ok_or_else(|| {
+        err(
+            StatusCode::NOT_FOUND,
+            "no_keys",
+            "That user cannot receive messages yet",
+        )
+    })
+}
 
-    Ok(Json(BundleResponse {
-        registration_id: row.get(0),
-        identity_key: row.get(1),
-        bundle_static: serde_json::from_str(&bundle_static).map_err(internal)?,
-        one_time_prekey: pop_prekey(&state.db, &username, "ec").await?,
-        kyber_prekey: pop_prekey(&state.db, &username, "kyber").await?,
-    }))
+/// Bundles for every device of an account: a message is encrypted separately
+/// for each one.
+async fn fetch_bundles(
+    _auth: AuthUser,
+    State(state): State<AppState>,
+    Path(username): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let username = username.to_lowercase();
+    let rows = sqlx::query(
+        "SELECT id, registration_id, identity_key, bundle_static FROM devices
+         WHERE username = ? ORDER BY id",
+    )
+    .bind(&username)
+    .fetch_all(&state.db)
+    .await
+    .map_err(internal)?;
+    if rows.is_empty() {
+        return Err(not_found());
+    }
+
+    let mut devices = Vec::new();
+    for row in rows {
+        if let Some(bundle) = bundle_for(
+            &state.db,
+            &username,
+            row.get(0),
+            row.get(1),
+            row.get(2),
+            row.get(3),
+        )
+        .await?
+        {
+            devices.push(serde_json::to_value(bundle).map_err(internal)?);
+        }
+    }
+    if devices.is_empty() {
+        return Err(err(
+            StatusCode::NOT_FOUND,
+            "no_keys",
+            "That user cannot receive messages yet",
+        ));
+    }
+    Ok(Json(serde_json::json!({ "devices": devices })))
+}
+
+#[derive(Deserialize)]
+struct Envelope {
+    device: i64,
+    body: String,
 }
 
 #[derive(Deserialize)]
 struct SendMessageRequest {
-    /// Opaque encrypted payload (base64), including its envelope/type.
-    body: String,
+    /// Opaque encrypted payload, for clients that predate multiple devices.
+    /// It goes to the account's first device, the one they hold a session
+    /// with.
+    body: Option<String>,
+    /// One payload per recipient device: the message is encrypted separately
+    /// for each, so the server carries several copies of something it still
+    /// cannot read.
+    #[serde(default)]
+    envelopes: Vec<Envelope>,
 }
 
 #[derive(Serialize)]
@@ -1494,7 +1914,11 @@ async fn send_message(
     }
     // Messaging is contacts-only: an accepted link is what a contact request
     // buys you, and it also keeps strangers from filling anyone's mailbox.
-    if link_state(&state.db, &recipient, &auth.username).await?.as_deref() != Some("accepted") {
+    // Sending to yourself is how your own other devices keep up.
+    let to_self = recipient == auth.username;
+    if !to_self
+        && link_state(&state.db, &recipient, &auth.username).await?.as_deref() != Some("accepted")
+    {
         return Err(err(
             StatusCode::FORBIDDEN,
             "not_a_contact",
@@ -1519,29 +1943,72 @@ async fn send_message(
         ));
     }
 
-    let msg = OutMessage {
-        id: uuid::Uuid::new_v4().to_string(),
-        sender: auth.username,
-        body: req.body,
-        created_at: now_ms,
+    // One id for the whole fan-out: the sender tracks a single message, and
+    // each copy is acknowledged by the device that received it.
+    let id = uuid::Uuid::new_v4().to_string();
+    let copies: Vec<(i64, String)> = match req.body {
+        // A client that knows nothing about devices holds a session with the
+        // account's first one.
+        Some(body) => vec![(primary_device(&state.db, &recipient).await?, body)],
+        None => req.envelopes.into_iter().map(|e| (e.device, e.body)).collect(),
     };
-    sqlx::query("INSERT INTO messages (id, sender, recipient, body, created_at) VALUES (?, ?, ?, ?, ?)")
-        .bind(&msg.id)
-        .bind(&msg.sender)
+    if copies.is_empty() {
+        return Err(bad_request("invalid_request", "No message body"));
+    }
+
+    for (device, body) in &copies {
+        // A copy for a device that is gone would sit in the queue forever.
+        if to_self && *device == auth.device {
+            continue;
+        }
+        sqlx::query(
+            "INSERT INTO messages
+                 (id, recipient_device, sender, sender_device, recipient, body, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(device)
+        .bind(&auth.username)
+        .bind(auth.device)
         .bind(&recipient)
-        .bind(&msg.body)
-        .bind(msg.created_at)
+        .bind(body)
+        .bind(now_ms)
         .execute(&state.db)
         .await
         .map_err(internal)?;
 
-    tracing::debug!(from = %msg.sender, to = %recipient, id = %msg.id, "message queued");
-    // Best-effort live push; the SSE backlog query covers anyone offline.
-    if let Some(listener) = state.live.lock().await.get(&recipient) {
-        let _ = listener.tx.try_send(Push::Message(msg.clone()));
-        tracing::debug!(to = %recipient, id = %msg.id, "live delivery (SSE)");
+        // Best-effort live push; the SSE backlog query covers anyone offline.
+        let msg = OutMessage {
+            id: id.clone(),
+            sender: auth.username.clone(),
+            sender_device: auth.device,
+            body: body.clone(),
+            created_at: now_ms,
+        };
+        if let Some(listener) = state.live.lock().await.get(&(recipient.clone(), *device)) {
+            let _ = listener.tx.try_send(Push::Message(msg));
+        }
     }
-    Ok(Json(SendMessageResponse { id: msg.id }))
+    tracing::debug!(
+        from = %auth.username,
+        to = %recipient,
+        devices = copies.len(),
+        %id,
+        "message queued"
+    );
+    Ok(Json(SendMessageResponse { id }))
+}
+
+/// The account's first device: where a client that predates multiple devices
+/// sends, and whose bundle it fetches.
+async fn primary_device(db: &SqlitePool, username: &str) -> Result<i64, ApiError> {
+    sqlx::query("SELECT MIN(id) FROM devices WHERE username = ?")
+        .bind(username)
+        .fetch_one(db)
+        .await
+        .map_err(internal)?
+        .get::<Option<i64>, _>(0)
+        .ok_or_else(not_found)
 }
 
 async fn message_stream(
@@ -1561,7 +2028,7 @@ async fn message_stream(
     let (tx, rx) = mpsc::channel::<Push>(256);
     let listener_id = state.next_listener_id.fetch_add(1, Ordering::Relaxed);
     state.live.lock().await.insert(
-        auth.username.clone(),
+        (auth.username.clone(), auth.device),
         Listener {
             id: listener_id,
             tx: tx.clone(),
@@ -1573,18 +2040,23 @@ async fn message_stream(
         live: state.live.clone(),
         db: state.db.clone(),
         username: auth.username.clone(),
+        device: auth.device,
         id: listener_id,
     };
     // Coming online is a presence change for everyone watching.
     touch_last_seen(&state.db, &auth.username).await;
+    touch_device(&state.db, &auth.username, auth.device).await;
     notify_watchers(&state.db, &state.live, &auth.username).await;
 
     // Backlog first, then live pushes. Clients dedupe by message id: a message
-    // arriving during the backlog query can be delivered twice.
+    // arriving during the backlog query can be delivered twice. Only this
+    // device's copies: another device has its own queue.
     let rows = sqlx::query(
-        "SELECT id, sender, body, created_at FROM messages WHERE recipient = ? ORDER BY created_at",
+        "SELECT id, sender, sender_device, body, created_at FROM messages
+         WHERE recipient = ? AND recipient_device = ? ORDER BY created_at",
     )
     .bind(&auth.username)
+    .bind(auth.device)
     .fetch_all(&state.db)
     .await
     .map_err(internal)?;
@@ -1594,8 +2066,9 @@ async fn message_stream(
             let msg = OutMessage {
                 id: r.get(0),
                 sender: r.get(1),
-                body: r.get(2),
-                created_at: r.get(3),
+                sender_device: r.get(2),
+                body: r.get(3),
+                created_at: r.get(4),
             };
             if tx.send(Push::Message(msg)).await.is_err() {
                 return;
@@ -1625,26 +2098,33 @@ struct LiveGuard {
     live: LiveMap,
     db: SqlitePool,
     username: String,
+    device: i64,
     id: u64,
 }
 
 impl Drop for LiveGuard {
     fn drop(&mut self) {
-        let (live, db, username, id) =
-            (self.live.clone(), self.db.clone(), self.username.clone(), self.id);
+        let (live, db, username, device, id) = (
+            self.live.clone(),
+            self.db.clone(),
+            self.username.clone(),
+            self.device,
+            self.id,
+        );
         tokio::spawn(async move {
+            let key = (username.clone(), device);
             let removed = {
                 let mut map = live.lock().await;
-                let mine = map.get(&username).is_some_and(|l| l.id == id);
+                let mine = map.get(&key).is_some_and(|l| l.id == id);
                 if mine {
-                    map.remove(&username);
-                    tracing::debug!(user = %username, "event stream closed");
+                    map.remove(&key);
+                    tracing::debug!(user = %username, device, "event stream closed");
                 }
                 mine
             };
-            // Going offline is a presence change too, and fixes the moment
-            // the contact was last around.
-            if removed {
+            // Going offline is a presence change too, and fixes the moment the
+            // contact was last around — but only once their last device goes.
+            if removed && !is_connected(&live, &username).await {
                 touch_last_seen(&db, &username).await;
                 notify_watchers(&db, &live, &username).await;
             }
@@ -1679,13 +2159,17 @@ async fn mark_read(
         .await
         .map_err(internal)?;
 
-    if let Some(listener) = state.live.lock().await.get(&sender) {
-        let _ = listener.tx.try_send(Push::Receipt {
+    // Every device of the sender: they all show the same conversation.
+    push_to_account(
+        &state.live,
+        &sender,
+        Push::Receipt {
             id: id.clone(),
             state: "read",
             at: now(),
-        });
-    }
+        },
+    )
+    .await;
     tracing::debug!(user = %auth.username, id = %id, "message read");
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1810,9 +2294,10 @@ async fn ack_message(
     // the sender it arrived: they still hold it as unsent, which is what lets
     // them send it again once the session is rebuilt.
     if params.undecryptable.is_some() {
-        sqlx::query("DELETE FROM messages WHERE id = ? AND recipient = ?")
+        sqlx::query("DELETE FROM messages WHERE id = ? AND recipient = ? AND recipient_device = ?")
             .bind(&id)
             .bind(&auth.username)
+            .bind(auth.device)
             .execute(&state.db)
             .await
             .map_err(internal)?;
@@ -1822,17 +2307,20 @@ async fn ack_message(
     // Remember who sent it before the row goes, so a later read receipt still
     // knows where to go.
     let sender: Option<String> =
-        sqlx::query("SELECT sender FROM messages WHERE id = ? AND recipient = ?")
+        sqlx::query("SELECT sender FROM messages WHERE id = ? AND recipient = ? AND recipient_device = ?")
             .bind(&id)
             .bind(&auth.username)
+            .bind(auth.device)
             .fetch_optional(&state.db)
             .await
             .map_err(internal)?
             .map(|r| r.get(0));
 
-    sqlx::query("DELETE FROM messages WHERE id = ? AND recipient = ?")
+    // Only this device's copy: the message is still queued for the others.
+    sqlx::query("DELETE FROM messages WHERE id = ? AND recipient = ? AND recipient_device = ?")
         .bind(&id)
         .bind(&auth.username)
+        .bind(auth.device)
         .execute(&state.db)
         .await
         .map_err(internal)?;
@@ -1856,13 +2344,16 @@ async fn ack_message(
             .execute(&state.db)
             .await;
 
-        if let Some(listener) = state.live.lock().await.get(&sender) {
-            let _ = listener.tx.try_send(Push::Receipt {
+        push_to_account(
+            &state.live,
+            &sender,
+            Push::Receipt {
                 id: id.clone(),
                 state: "delivered",
                 at: now_ms,
-            });
-        }
+            },
+        )
+        .await;
     }
     tracing::debug!(user = %auth.username, id = %id, "message acknowledged and deleted");
     Ok(StatusCode::NO_CONTENT)

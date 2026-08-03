@@ -183,7 +183,10 @@ async fn account_lifecycle() {
         .unwrap();
     assert_eq!(res.status(), 200);
     let relogin: Value = res.json().await.unwrap();
-    assert_eq!(relogin["token"].as_str().unwrap(), alice);
+    // A fresh token each time, so an old one cannot outlive the session it
+    // belonged to. It identifies the same device.
+    let alice = relogin["token"].as_str().unwrap().to_string();
+    assert_eq!(relogin["device_id"].as_i64(), Some(1));
     let res = client
         .post(format!("{base}/v1/sessions"))
         .json(&json!({ "username": "alice", "password": "incorrecta" }))
