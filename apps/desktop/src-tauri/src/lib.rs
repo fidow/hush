@@ -320,23 +320,24 @@ fn set_close_to_tray(state: State<'_, CloseToTray>, enabled: bool) {
     state.0.store(enabled, Ordering::Relaxed);
 }
 
+/// One contact as the interface reads it. Written out field by field because
+/// `ContactEntry` is not serialisable, which is also why anything left out
+/// here silently disappears on its way to the webview.
+fn contact_json(c: ContactEntry) -> serde_json::Value {
+    serde_json::json!({
+        "username": c.username,
+        "alias": c.alias,
+        "state": c.state,
+        "status": c.status,
+        "last_seen": c.last_seen,
+        "avatar": c.avatar,
+    })
+}
+
 /// The contact list with state and presence for each entry.
 #[tauri::command]
 async fn get_contacts(client: State<'_, HushClient>) -> Result<Vec<serde_json::Value>, String> {
-    Ok(client
-        .contacts()
-        .await?
-        .into_iter()
-        .map(|c: ContactEntry| {
-            serde_json::json!({
-                "username": c.username,
-                "alias": c.alias,
-                "state": c.state,
-                "status": c.status,
-                "last_seen": c.last_seen,
-            })
-        })
-        .collect())
+    Ok(client.contacts().await?.into_iter().map(contact_json).collect())
 }
 
 /// Changes the local account's display name and/or presence.
@@ -578,4 +579,29 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The webview reads a fixed set of fields off each contact; one missing
+    /// from the hand-written JSON reads as `undefined` there, with nothing to
+    /// say it was ever dropped. A profile picture was lost exactly this way.
+    #[test]
+    fn a_contact_reaches_the_interface_with_every_field_it_reads() {
+        let value = contact_json(ContactEntry {
+            username: "alice".into(),
+            alias: "Alicia".into(),
+            state: "accepted".into(),
+            status: "online".into(),
+            last_seen: Some(1_700_000_000_000),
+            avatar: Some("data:image/jpeg;base64,AAAA".into()),
+        });
+        // The fields declared by `interface ContactEntry` in main.ts.
+        for field in ["username", "alias", "state", "status", "last_seen", "avatar"] {
+            assert!(!value[field].is_null(), "the interface never sees {field}");
+        }
+        assert_eq!(value["avatar"], "data:image/jpeg;base64,AAAA");
+    }
 }
