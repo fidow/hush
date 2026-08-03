@@ -403,14 +403,25 @@ function renderMessages() {
     } else {
       div.textContent = msg.text;
     }
+    // Time, and for our own messages the delivery ticks beside it: one for
+    // sent, two for delivered, blue two for read.
+    const meta = document.createElement("span");
+    meta.className = "meta";
+    const clock = document.createElement("span");
+    clock.className = "clock";
+    clock.textContent = new Date(msg.created_at).toLocaleTimeString(lang(), {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+    meta.appendChild(clock);
     if (msg.mine) {
-      // Delivery ticks: one for sent, two for delivered, blue two for read.
       const ticks = document.createElement("span");
       ticks.className = `ticks ticks-${msg.state}`;
       ticks.textContent = msg.state === "sent" ? "✓" : "✓✓";
       ticks.title = t(`receipt.${msg.state}`);
-      div.appendChild(ticks);
+      meta.appendChild(ticks);
     }
+    div.appendChild(meta);
     div.title = fullTime(msg.created_at);
     container.appendChild(div);
   }
@@ -1373,6 +1384,18 @@ $("#delete-mine").addEventListener("click", () => void confirmDelete(false));
 $("#delete-everyone").addEventListener("click", () => void confirmDelete(true));
 
 listen<{ id: string }>("hush://deleted", ({ payload }) => removeMessageLocally(payload.id));
+
+// A message sent again after a session was rebuilt travels under a new id;
+// following it keeps one entry in the conversation and lets its ticks move.
+listen<{ old_id: string; new_id: string }>("hush://resent", ({ payload }) => {
+  for (const contact of contacts.values()) {
+    const msg = contact.messages.find((m) => m.id === payload.old_id);
+    if (!msg) continue;
+    msg.id = payload.new_id;
+    renderMessages();
+    break;
+  }
+});
 
 // ---- Confirmación genérica ----
 

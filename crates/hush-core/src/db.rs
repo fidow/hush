@@ -552,6 +552,46 @@ impl LocalDb {
 
     /// Ids of messages received from `contact` that we have not reported as
     /// read yet.
+    /// Our messages to `contact` that the other device never acknowledged,
+    /// oldest first. Used to send them again once a broken session is rebuilt.
+    pub fn undelivered_to(&self, contact: &str) -> Result<Vec<StoredMessage>> {
+        let rows: Vec<StoredMessage> = self.with(|c| {
+            c.prepare(
+                "SELECT id, contact, mine, kind, text, state, delivered_at, read_at, created_at
+                 FROM messages
+                 WHERE contact = ?1 AND mine = 1 AND state = 'sent'
+                 ORDER BY created_at",
+            )?
+            .query_map([contact], |r| {
+                Ok(StoredMessage {
+                    id: r.get(0)?,
+                    contact: r.get(1)?,
+                    mine: r.get::<_, i64>(2)? != 0,
+                    kind: r.get(3)?,
+                    text: r.get(4)?,
+                    state: r.get(5)?,
+                    delivered_at: r.get(6)?,
+                    read_at: r.get(7)?,
+                    created_at: r.get(8)?,
+                })
+            })?
+            .collect()
+        })?;
+        Ok(rows.into_iter().map(|m| self.decrypt_message(m)).collect())
+    }
+
+    /// Points a stored message at the id the server gave it when it was sent
+    /// again, so the conversation keeps one entry and receipts still land.
+    pub fn reassign_message_id(&self, old: &str, new: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE messages SET id = ?1 WHERE id = ?2",
+                params![new, old],
+            )
+            .map(|_| ())
+        })
+    }
+
     pub fn unread_from(&self, contact: &str) -> Result<Vec<String>> {
         self.with(|c| {
             c.prepare(

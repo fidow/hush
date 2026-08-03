@@ -160,6 +160,12 @@ async fn connect(
                 ClientEvent::MessageDeleted { id } => {
                     let _ = app.emit("hush://deleted", serde_json::json!({ "id": id }));
                 }
+                ClientEvent::MessageResent { old_id, new_id } => {
+                    let _ = app.emit(
+                        "hush://resent",
+                        serde_json::json!({ "old_id": old_id, "new_id": new_id }),
+                    );
+                }
                 ClientEvent::Receipt { id, state, at } => {
                     let _ = app.emit(
                         "hush://receipt",

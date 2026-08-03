@@ -20,6 +20,9 @@ pub enum ClientEvent {
     Message(DecryptedMessage),
     /// The other side deleted a message for everyone.
     MessageDeleted { id: String },
+    /// A message was sent again after rebuilding a session, so it now travels
+    /// under a different id.
+    MessageResent { old_id: String, new_id: String },
     /// The contact list changed (a request arrived, was accepted, …).
     ContactsChanged,
     /// One of our messages was delivered or read.
@@ -726,12 +729,15 @@ impl Actor {
         }
     }
 
-    async fn handle_send(
+    /// Encrypts and sends, returning the id the server assigned. Whether the
+    /// message belongs in the conversation is the caller's business: a resend
+    /// updates the row it already has.
+    async fn send_envelope(
         &mut self,
         recipient: &str,
         kind: &str,
         content: &str,
-    ) -> anyhow::Result<StoredMessage> {
+    ) -> anyhow::Result<String> {
         let session = self
             .session
             .as_mut()
@@ -756,6 +762,17 @@ impl Actor {
             .encrypt(recipient, &encode_content(kind, content))
             .await?;
         let id = session.api.send_message(recipient, &envelope).await?;
+        self.db.upsert_contact(recipient, &remote.alias, "accepted")?;
+        Ok(id)
+    }
+
+    async fn handle_send(
+        &mut self,
+        recipient: &str,
+        kind: &str,
+        content: &str,
+    ) -> anyhow::Result<StoredMessage> {
+        let id = self.send_envelope(recipient, kind, content).await?;
         let stored = StoredMessage {
             id,
             contact: recipient.to_string(),
@@ -773,8 +790,57 @@ impl Actor {
         if !Self::is_control(kind) {
             self.db.add_message(&stored)?;
         }
-        self.db.upsert_contact(recipient, &remote.alias, "accepted")?;
         Ok(stored)
+    }
+
+    /// Sends again what `peer` never acknowledged.
+    ///
+    /// Called once their session has been rebuilt: those messages were
+    /// encrypted for a ratchet they no longer have, so they would never
+    /// arrive. The stored message follows the id the server gives the new
+    /// copy, keeping one entry in the conversation and letting receipts land.
+    async fn resend_undelivered(&mut self, peer: &str) {
+        let pending = match self.db.undelivered_to(peer) {
+            Ok(pending) => pending,
+            Err(e) => {
+                tracing::warn!("cannot look up undelivered messages for {peer}: {e}");
+                return;
+            }
+        };
+        if pending.is_empty() {
+            return;
+        }
+        tracing::info!("sending {} unacknowledged messages to {peer} again", pending.len());
+
+        for mut msg in pending {
+            match self.send_envelope(peer, &msg.kind, &msg.text).await {
+                Ok(id) => {
+                    if let Err(e) = self.db.reassign_message_id(&msg.id, &id) {
+                        tracing::warn!("cannot follow the resent message: {e}");
+                        continue;
+                    }
+                    if let Some(session) = self.session.as_ref() {
+                        let _ = session.api.delete_archive_entry(&msg.id).await;
+                    }
+                    if let Some(events) = &self.events {
+                        let _ = events
+                            .send(ClientEvent::MessageResent {
+                                old_id: msg.id.clone(),
+                                new_id: id.clone(),
+                            })
+                            .await;
+                    }
+                    msg.id = id;
+                    self.archive_message(&msg).await;
+                }
+                Err(e) => {
+                    // The session is broken again, or the server is gone;
+                    // either way the rest will not fare better.
+                    tracing::warn!("cannot resend to {peer}: {e}");
+                    return;
+                }
+            }
+        }
     }
 
     /// Deletes a message here and, for `for_everyone`, tells the other side.
@@ -864,11 +930,13 @@ impl Actor {
                 let _ = session.api.ack_message(&msg.id).await;
                 let (kind, text) = decode_content(&plain);
 
-                // Nothing to do beyond having received it: decrypting it
-                // already adopted the sender's new session, so what we send
-                // next is readable on their side.
+                // Decrypting it already adopted the sender's new session, so
+                // what we send next is readable on their side — including
+                // whatever they never managed to receive.
                 if kind == "rekey" {
                     tracing::info!("{} rebuilt the session with us", msg.sender);
+                    let sender = msg.sender.clone();
+                    self.resend_undelivered(&sender).await;
                     return None;
                 }
 
@@ -935,9 +1003,10 @@ impl Actor {
             }
             Err(e) => {
                 tracing::warn!("failed to decrypt message {} from {}: {e}", msg.id, msg.sender);
-                // Ack anyway: an undecryptable message (stale session from a
-                // previous device) would otherwise be redelivered forever.
-                let _ = session.api.ack_message(&msg.id).await;
+                // Drop it rather than acknowledge it: it would otherwise be
+                // redelivered forever, but telling the sender it arrived would
+                // also stop them from sending it again once we can read them.
+                let _ = session.api.discard_message(&msg.id).await;
                 self.repair_session(&msg.sender).await;
                 None
             }

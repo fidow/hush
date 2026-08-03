@@ -36,7 +36,7 @@ use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, Salt
 use argon2::Argon2;
 
 use axum::{
-    extract::{FromRequestParts, Path, State},
+    extract::{FromRequestParts, Path, Query, State},
     http::{request::Parts, StatusCode},
     response::sse::{Event, KeepAlive, Sse},
     routing::{get, post, put},
@@ -1782,13 +1782,34 @@ async fn list_archive(
     Ok(Json(serde_json::json!({ "entries": entries })))
 }
 
+#[derive(Deserialize)]
+struct AckParams {
+    /// Set when the recipient could not decrypt the message.
+    undecryptable: Option<String>,
+}
+
 async fn ack_message(
     auth: AuthUser,
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(params): Query<AckParams>,
 ) -> Result<StatusCode, ApiError> {
     if id.len() > 128 {
         return Err(bad_request("invalid_id", "Invalid identifier"));
+    }
+
+    // A message the recipient could not decrypt is dropped without telling
+    // the sender it arrived: they still hold it as unsent, which is what lets
+    // them send it again once the session is rebuilt.
+    if params.undecryptable.is_some() {
+        sqlx::query("DELETE FROM messages WHERE id = ? AND recipient = ?")
+            .bind(&id)
+            .bind(&auth.username)
+            .execute(&state.db)
+            .await
+            .map_err(internal)?;
+        tracing::debug!(user = %auth.username, id = %id, "undecryptable message discarded");
+        return Ok(StatusCode::NO_CONTENT);
     }
     // Remember who sent it before the row goes, so a later read receipt still
     // knows where to go.

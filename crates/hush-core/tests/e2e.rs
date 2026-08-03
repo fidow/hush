@@ -273,11 +273,22 @@ async fn a_contact_who_lost_their_session_can_be_reached_again() {
     bob_db.execute("DELETE FROM sessions", []).unwrap();
     drop(bob_db);
 
-    // This one is lost: it is encrypted under the ratchet Bob no longer has.
-    alice.send_text("bob", "primero tras el incidente").await.unwrap();
+    // Bob cannot read this one, but it must not be lost: once he rebuilds the
+    // session, Alice sends again what he never acknowledged.
+    let sent = alice.send_text("bob", "primero tras el incidente").await.unwrap();
+    wait_for_text(&bob, "alice", "primero tras el incidente").await;
 
-    // But the conversation has to come back by itself.
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    // And it stays a single entry on Alice's side, under the id it was
+    // finally sent with.
+    let history = alice.history("bob").await.unwrap();
+    let resent: Vec<&hush_core::StoredMessage> = history
+        .iter()
+        .filter(|m| m.text == "primero tras el incidente")
+        .collect();
+    assert_eq!(resent.len(), 1, "the resent message must not be duplicated");
+    assert_ne!(resent[0].id, sent.id, "it travels under a new id");
+
+    // The conversation works in both directions afterwards.
     alice.send_text("bob", "segundo tras el incidente").await.unwrap();
     wait_for_text(&bob, "alice", "segundo tras el incidente").await;
     bob.send_text("alice", "te vuelvo a leer").await.unwrap();

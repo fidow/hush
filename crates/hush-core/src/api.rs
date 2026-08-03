@@ -299,6 +299,18 @@ impl ApiClient {
         Ok(())
     }
 
+    /// Drops a message we could not decrypt. Unlike an acknowledgement this
+    /// tells the sender nothing, so their copy stays unsent and can be sent
+    /// again once the session is rebuilt.
+    pub async fn discard_message(&self, id: &str) -> Result<()> {
+        let req = self.auth(
+            self.http
+                .delete(format!("{}/v1/messages/{id}?undecryptable=1", self.base)),
+        )?;
+        Self::check(req.send().await.map_err(Self::conn_err)?).await?;
+        Ok(())
+    }
+
     /// Asks the server to email a password reset code. Succeeds even for
     /// unknown accounts, by design. Returns the dev code when echoed.
     pub async fn forgot_password(&self, username: &str) -> Result<Option<String>> {
