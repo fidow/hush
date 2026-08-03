@@ -157,6 +157,15 @@
           <p id="conv-empty-note" class="conv-empty-note"></p>
         </div>
 
+        <!-- Only while picking messages to delete. -->
+        <div id="selection-bar" class="selection-bar hidden">
+          <span id="selection-count"></span>
+          <div class="selection-actions">
+            <button type="button" id="selection-delete" class="mini" data-i18n="select.delete"></button>
+            <button type="button" id="selection-cancel" class="mini secondary" data-i18n="select.cancel"></button>
+          </div>
+        </div>
+
         <div id="messages"></div>
         <div id="emoji-panel" class="hidden">
           <div id="emoji-tabs"></div>
@@ -212,9 +221,15 @@
           <input type="checkbox" id="settings-tray" />
           <span data-i18n="settings.closeToTray"></span>
         </label>
-        <label class="toggle">
+        <label class="toggle desktop-only">
           <input type="checkbox" id="settings-sound" />
           <span data-i18n="settings.sound"></span>
+        </label>
+        <!-- On a phone the choice is what the notification itself does, since
+             the system is what decides whether it may make a sound at all. -->
+        <label class="mobile-only hidden">
+          <span data-i18n="settings.alerts"></span>
+          <select id="settings-alerts"></select>
         </label>
         <hr />
 

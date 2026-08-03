@@ -12,12 +12,38 @@ import {
 
 const NOTIFY_KEY = "hush-notifications";
 const SOUND_KEY = "hush-sound";
+const ALERT_KEY = "hush-alert-mode";
+
+/// How a phone should announce a message. Sound and vibration are left to
+/// Android through the notification, which is what makes a phone on silent
+/// stay silent; a tone synthesised here would ignore that entirely.
+export type AlertMode = "sound" | "vibrate" | "none";
+
+const IS_MOBILE = /android/i.test(navigator.userAgent);
+
+export function alertMode(): AlertMode {
+  const stored = localStorage.getItem(ALERT_KEY);
+  return stored === "vibrate" || stored === "none" ? stored : "sound";
+}
+
+export function setAlertMode(mode: AlertMode) {
+  localStorage.setItem(ALERT_KEY, mode);
+  void invoke("set_alert_mode", { value: mode }).catch(() => {});
+}
+
+/// Tells the Rust side the current choice: a message arriving while the app is
+/// in the background is announced from there.
+export function publishAlertMode() {
+  void invoke("set_alert_mode", { value: alertMode() }).catch(() => {});
+}
 
 export function notificationsEnabled(): boolean {
   return localStorage.getItem(NOTIFY_KEY) !== "off";
 }
 
 export function soundEnabled(): boolean {
+  // On a phone the choice is the three-way alert mode instead.
+  if (IS_MOBILE) return alertMode() === "sound";
   return localStorage.getItem(SOUND_KEY) !== "off";
 }
 
@@ -54,8 +80,12 @@ async function ensurePermission(): Promise<boolean> {
 let audio: AudioContext | null = null;
 
 /// Two short descending notes, quiet and quick enough not to grate.
+///
+/// Desktop only: a phone announces messages through the system notification,
+/// which obeys the ringer and Do Not Disturb. Synthesising a tone here would
+/// play it with the phone on silent, which is exactly what nobody wants.
 export function playChime() {
-  if (!soundEnabled()) return;
+  if (IS_MOBILE || !soundEnabled()) return;
   try {
     audio ??= new AudioContext();
     const now = audio.currentTime;
@@ -99,9 +129,17 @@ export async function notify(title: string, body: string) {
   }
 }
 
-/// Alerts about something that happened while the user was away: a desktop
-/// notification plus the chime, each subject to its own setting.
+/// Alerts about something that happened while the user was away.
+///
+/// On a phone that is the notification alone, with its sound and vibration
+/// decided by the channel the alert mode picks. On a desktop it is the
+/// notification plus the chime, each with its own setting.
 export async function alertUser(title: string, body: string) {
+  if (IS_MOBILE && alertMode() === "none") {
+    // Still worth showing, just without announcing itself.
+    await notify(title, body);
+    return;
+  }
   playChime();
   await notify(title, body);
 }

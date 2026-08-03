@@ -11,15 +11,43 @@ use hush_core::{ClientEvent, ContactEntry, HushClient, ProfileInfo, StoredMessag
 use tauri::menu::{Menu, MenuItem};
 #[cfg(desktop)]
 use tauri::tray::{TrayIconBuilder, TrayIconEvent};
-use tauri::{Emitter, Manager, State, WindowEvent};
+#[cfg(desktop)]
+use tauri::WindowEvent;
+use tauri::{Emitter, Manager, State};
 
 #[cfg(windows)]
 mod identity;
+#[cfg(desktop)]
+mod single_instance;
+
+/// There is no log to write to in a packaged build, so this only shows up when
+/// the app is started from a console.
+#[cfg(desktop)]
+fn tracing_note(message: &str) {
+    eprintln!("hush: {message}");
+}
 
 /// Whether closing the window hides the app instead of quitting it. Lives in
 /// Rust because the close handler runs there, but the choice is the user's
 /// and the UI stores it.
 struct CloseToTray(Arc<AtomicBool>);
+
+/// How the user wants to be alerted: "sound", "vibrate" or "none". The
+/// interface owns the setting, but a message arriving in the background is
+/// announced from here, so the choice has to be readable from Rust.
+struct AlertMode(Arc<std::sync::Mutex<String>>);
+
+/// The Android notification channel for that choice. Channels carry the sound
+/// and vibration, and Android silences them itself when the phone is on
+/// silent, which a tone played by the app would not respect.
+#[cfg(target_os = "android")]
+fn alert_channel(mode: &str) -> &'static str {
+    match mode {
+        "sound" => "hush-messages-sound",
+        "vibrate" => "hush-messages-vibrate",
+        _ => "hush-messages-silent",
+    }
+}
 
 /// The account stored on this device, if any.
 #[tauri::command]
@@ -163,11 +191,18 @@ async fn connect(
                         } else {
                             msg.text.chars().take(120).collect()
                         };
+                        let mode = app
+                            .state::<AlertMode>()
+                            .0
+                            .lock()
+                            .map(|m| m.clone())
+                            .unwrap_or_else(|_| "sound".to_string());
                         let _ = app
                             .notification()
                             .builder()
                             .title(&msg.sender)
                             .body(preview)
+                            .channel_id(alert_channel(&mode))
                             .show();
                     }
                     let _ = app.emit(
@@ -357,6 +392,17 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+/// Wipes a whole conversation, optionally withdrawing our own messages from
+/// the other device too.
+#[tauri::command]
+async fn delete_conversation(
+    client: State<'_, HushClient>,
+    contact: String,
+    for_everyone: bool,
+) -> Result<usize, String> {
+    client.delete_conversation(&contact, for_everyone).await
+}
+
 /// Sets our profile picture, or clears it, and hands it to every contact.
 #[tauri::command]
 async fn set_avatar(client: State<'_, HushClient>, avatar: Option<String>) -> Result<(), String> {
@@ -390,7 +436,24 @@ fn notify(app: tauri::AppHandle, title: String, body: String) -> Result<(), Stri
             .show()
             .map_err(|e| e.to_string())
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "android")]
+    {
+        use tauri_plugin_notification::NotificationExt;
+        let mode = app
+            .state::<AlertMode>()
+            .0
+            .lock()
+            .map(|m| m.clone())
+            .unwrap_or_else(|_| "sound".to_string());
+        app.notification()
+            .builder()
+            .title(title)
+            .body(body)
+            .channel_id(alert_channel(&mode))
+            .show()
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(any(windows, target_os = "android")))]
     {
         use tauri_plugin_notification::NotificationExt;
         app.notification()
@@ -399,6 +462,15 @@ fn notify(app: tauri::AppHandle, title: String, body: String) -> Result<(), Stri
             .body(body)
             .show()
             .map_err(|e| e.to_string())
+    }
+}
+
+/// Remembers how the user wants to be alerted, so a message arriving while the
+/// interface is asleep is announced the way they asked.
+#[tauri::command]
+fn set_alert_mode(mode: State<'_, AlertMode>, value: String) {
+    if let Ok(mut mode) = mode.0.lock() {
+        *mode = value;
     }
 }
 
@@ -424,10 +496,30 @@ pub fn run() {
             identity::register(&app.config().identifier, "Hush", &dir);
             // HUSH_PROFILE lets several instances coexist on one machine
             // (useful to test two accounts locally).
-            let file = match std::env::var("HUSH_PROFILE") {
-                Ok(p) if !p.is_empty() => format!("hush-{p}.db"),
-                _ => "hush.db".to_string(),
+            let profile = match std::env::var("HUSH_PROFILE") {
+                Ok(p) if !p.is_empty() => p,
+                _ => "hush".to_string(),
             };
+            let file = format!("{profile}.db");
+
+            // Two copies of the same profile share a database and a set of
+            // ratchet sessions, and would end up unable to read each other's
+            // conversations. The second one hands the screen to the first.
+            #[cfg(desktop)]
+            {
+                match single_instance::acquire(&dir, &profile) {
+                    Some(lock) => {
+                        app.manage(lock);
+                    }
+                    None => {
+                        tracing_note("another copy of this profile is already running");
+                        single_instance::raise_running_instance("Hush");
+                        app.handle().exit(0);
+                        return Ok(());
+                    }
+                }
+            }
+
             app.manage(HushClient::spawn(dir.join(file)));
             app.manage(Arc::new(AtomicU64::new(0)));
 
@@ -436,6 +528,7 @@ pub fn run() {
             // Android there is no tray and the system owns the lifecycle.
             let close_to_tray = Arc::new(AtomicBool::new(true));
             app.manage(CloseToTray(close_to_tray.clone()));
+            app.manage(AlertMode(Arc::new(std::sync::Mutex::new("sound".to_string()))));
             #[cfg(desktop)]
             {
                 build_tray(app.handle())?;
@@ -479,7 +572,9 @@ pub fn run() {
             notify,
             get_devices,
             revoke_device,
-            set_avatar
+            set_avatar,
+            set_alert_mode,
+            delete_conversation
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

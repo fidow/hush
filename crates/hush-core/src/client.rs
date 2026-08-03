@@ -176,6 +176,13 @@ enum Command {
     Contacts {
         reply: oneshot::Sender<Result<Vec<ContactEntry>, String>>,
     },
+    /// Wipes a whole conversation here, and optionally asks the other side to
+    /// drop our messages from theirs.
+    DeleteConversation {
+        contact: String,
+        for_everyone: bool,
+        reply: oneshot::Sender<Result<usize, String>>,
+    },
     /// Our own profile picture, handed to every accepted contact.
     SetAvatar {
         avatar: Option<String>,
@@ -439,6 +446,24 @@ impl HushClient {
         let username = username.to_string();
         self.request(|reply| Command::BlockContact { username, reply })
             .await
+    }
+
+    /// Deletes the whole conversation with `contact` from this device. With
+    /// `for_everyone`, our own messages are withdrawn from their device too;
+    /// theirs stay where they are, which is not ours to decide.
+    /// Returns how many messages were removed here.
+    pub async fn delete_conversation(
+        &self,
+        contact: &str,
+        for_everyone: bool,
+    ) -> Result<usize, String> {
+        let contact = contact.to_string();
+        self.request(|reply| Command::DeleteConversation {
+            contact,
+            for_everyone,
+            reply,
+        })
+        .await
     }
 
     /// Sets our profile picture, or clears it with `None`, and sends it to
@@ -965,6 +990,38 @@ impl Actor {
         }
     }
 
+    /// Wipes the conversation with `contact` from this device, and with
+    /// `for_everyone` asks them to drop the messages we sent.
+    ///
+    /// Only our own can be withdrawn: theirs are theirs. Each withdrawal is an
+    /// encrypted control message, so a long conversation costs one message per
+    /// entry, sent before anything is removed here — once it is gone locally
+    /// there is nothing left to name.
+    async fn handle_delete_conversation(
+        &mut self,
+        contact: &str,
+        for_everyone: bool,
+    ) -> anyhow::Result<usize> {
+        let history = self.db.history(contact)?;
+
+        if for_everyone {
+            for message in history.iter().filter(|m| m.mine) {
+                if let Err(e) = self.handle_send(contact, "delete", &message.id).await {
+                    tracing::warn!("cannot withdraw {} from {contact}: {e}", message.id);
+                }
+            }
+        }
+
+        for message in &history {
+            let _ = self.db.delete_message(&message.id);
+            if let Some(session) = self.session.as_ref() {
+                let _ = session.api.delete_archive_entry(&message.id).await;
+            }
+        }
+        tracing::info!("deleted {} messages of the conversation with {contact}", history.len());
+        Ok(history.len())
+    }
+
     /// Sets our own profile picture and hands it to every accepted contact.
     ///
     /// It travels as an encrypted message like any other, so the server never
@@ -1036,8 +1093,26 @@ impl Actor {
 
     /// Pulls the contact list from the server into the local cache. Failures
     /// are tolerated: the cache keeps the app usable while offline.
-    async fn sync_contacts(&self) -> Option<Vec<ContactEntry>> {
+    /// Also reports which contacts have just become accepted, since that is
+    /// the moment they can be handed our profile picture: before it, sending
+    /// anything to them is refused.
+    async fn sync_contacts(&self) -> Option<(Vec<ContactEntry>, Vec<String>)> {
         let mut entries = self.session.as_ref()?.api.list_contacts().await.ok()?;
+        let known: std::collections::HashMap<String, String> = self
+            .db
+            .contacts()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(username, _, state)| (username, state))
+            .collect();
+        let newly_accepted: Vec<String> = entries
+            .iter()
+            .filter(|e| {
+                e.state == "accepted"
+                    && known.get(&e.username).is_none_or(|state| state != "accepted")
+            })
+            .map(|e| e.username.clone())
+            .collect();
         let cached: Vec<(String, String, String)> = entries
             .iter()
             .map(|c| (c.username.clone(), c.alias.clone(), c.state.clone()))
@@ -1048,12 +1123,30 @@ impl Actor {
         for entry in &mut entries {
             entry.avatar = self.db.contact_avatar(&entry.username).unwrap_or(None);
         }
-        Some(entries)
+        Some((entries, newly_accepted))
+    }
+
+    /// Hands our profile picture to contacts that have just become reachable.
+    /// Without this a picture set before someone accepted us would never
+    /// arrive: it is only ever sent when it changes.
+    async fn share_avatar_with(&mut self, contacts: &[String]) {
+        if contacts.is_empty() {
+            return;
+        }
+        let Ok(Some(avatar)) = self.db.meta_get("avatar") else {
+            return;
+        };
+        for contact in contacts {
+            if let Err(e) = self.handle_send(contact, "avatar", &avatar).await {
+                tracing::warn!("cannot send our picture to {contact}: {e}");
+            }
+        }
     }
 
     /// The contact list: the server's when reachable, the cache otherwise.
-    async fn contacts(&self) -> Result<Vec<ContactEntry>, String> {
-        if let Some(entries) = self.sync_contacts().await {
+    async fn contacts(&mut self) -> Result<Vec<ContactEntry>, String> {
+        if let Some((entries, newly_accepted)) = self.sync_contacts().await {
+            self.share_avatar_with(&newly_accepted).await;
             return Ok(entries);
         }
         self.db
@@ -1251,6 +1344,7 @@ async fn report_fatal(mut commands: mpsc::Receiver<Command>, reason: String) {
             Command::BlockContact { reply, .. } => drop(reply.send(Err(reason.clone()))),
             Command::DeleteMessage { reply, .. } => drop(reply.send(Err(reason.clone()))),
             Command::Contacts { reply } => drop(reply.send(Err(reason.clone()))),
+            Command::DeleteConversation { reply, .. } => drop(reply.send(Err(reason.clone()))),
             Command::SetAvatar { reply, .. } => drop(reply.send(Err(reason.clone()))),
             Command::Devices { reply } => drop(reply.send(Err(reason.clone()))),
             Command::RevokeDevice { reply, .. } => drop(reply.send(Err(reason.clone()))),
@@ -1374,7 +1468,9 @@ async fn actor(db_path: PathBuf, mut commands: mpsc::Receiver<Command>) {
                         Some(s) => s.api.request_contact(&username).await.map_err(|e| e.to_string()),
                     };
                     if result.is_ok() {
-                        actor.sync_contacts().await;
+                        if let Some((_, newly_accepted)) = actor.sync_contacts().await {
+                            actor.share_avatar_with(&newly_accepted).await;
+                        }
                     }
                     let _ = reply.send(result);
                 }
@@ -1385,7 +1481,9 @@ async fn actor(db_path: PathBuf, mut commands: mpsc::Receiver<Command>) {
                         Some(s) => s.api.accept_contact(&username).await.map_err(|e| e.to_string()),
                     };
                     if result.is_ok() {
-                        actor.sync_contacts().await;
+                        if let Some((_, newly_accepted)) = actor.sync_contacts().await {
+                            actor.share_avatar_with(&newly_accepted).await;
+                        }
                     }
                     let _ = reply.send(result);
                 }
@@ -1396,7 +1494,9 @@ async fn actor(db_path: PathBuf, mut commands: mpsc::Receiver<Command>) {
                         Some(s) => s.api.remove_contact(&username).await.map_err(|e| e.to_string()),
                     };
                     if result.is_ok() {
-                        actor.sync_contacts().await;
+                        if let Some((_, newly_accepted)) = actor.sync_contacts().await {
+                            actor.share_avatar_with(&newly_accepted).await;
+                        }
                     }
                     let _ = reply.send(result);
                 }
@@ -1407,7 +1507,9 @@ async fn actor(db_path: PathBuf, mut commands: mpsc::Receiver<Command>) {
                         Some(s) => s.api.block_contact(&username).await.map_err(|e| e.to_string()),
                     };
                     if result.is_ok() {
-                        actor.sync_contacts().await;
+                        if let Some((_, newly_accepted)) = actor.sync_contacts().await {
+                            actor.share_avatar_with(&newly_accepted).await;
+                        }
                     }
                     let _ = reply.send(result);
                 }
@@ -1417,6 +1519,12 @@ async fn actor(db_path: PathBuf, mut commands: mpsc::Receiver<Command>) {
                 }
                 Some(Command::Contacts { reply }) => {
                     let _ = reply.send(actor.contacts().await);
+                }
+                Some(Command::DeleteConversation { contact, for_everyone, reply }) => {
+                    let result = actor
+                        .handle_delete_conversation(&contact.to_lowercase(), for_everyone)
+                        .await;
+                    let _ = reply.send(result.map_err(|e| e.to_string()));
                 }
                 Some(Command::SetAvatar { avatar, reply }) => {
                     let result = actor.handle_set_avatar(avatar).await;
@@ -1472,7 +1580,9 @@ async fn actor(db_path: PathBuf, mut commands: mpsc::Receiver<Command>) {
                         }
                     }
                     Some(ServerEvent::ContactsChanged) => {
-                        actor.sync_contacts().await;
+                        if let Some((_, newly_accepted)) = actor.sync_contacts().await {
+                            actor.share_avatar_with(&newly_accepted).await;
+                        }
                         if let Some(events) = &actor.events {
                             let _ = events.send(ClientEvent::ContactsChanged).await;
                         }

@@ -580,6 +580,9 @@ pub struct AuthUser {
     /// Which of the account's devices is calling. Every queue, prekey and
     /// session belongs to a device, not to the account.
     pub device: i64,
+    /// Where the call came from. Carried along so every line of the log can
+    /// say which client it was, not just which account.
+    pub ip: String,
 }
 
 impl FromRequestParts<AppState> for AuthUser {
@@ -603,9 +606,13 @@ impl FromRequestParts<AppState> for AuthUser {
         .await
         .map_err(internal)?
         .ok_or_else(unauthorized)?;
+        let ClientIp(ip) = ClientIp::from_request_parts(parts, state)
+            .await
+            .unwrap_or_else(|_| ClientIp("unknown".into()));
         Ok(AuthUser {
             username: row.get(0),
             device: row.get(1),
+            ip,
         })
     }
 }
@@ -764,21 +771,21 @@ async fn register(
 
     // The address is not logged: it is the one piece of an account that ties
     // it to a person outside Hush.
-    tracing::info!(username = %username, "account created, pending verification");
+    tracing::info!(user = %username, %ip, "account created, pending verification");
     match mail::MailConfig::from_env() {
         Some(cfg) => {
             let (email, username, code) = (req.email.clone(), username.clone(), code.clone());
             tokio::task::spawn_blocking(move || {
                 match cfg.send_verification(&email, &username, &code) {
-                    Ok(()) => tracing::info!(%username, "verification email sent"),
-                    Err(e) => tracing::error!(%username, "failed to send verification email: {e}"),
+                    Ok(()) => tracing::info!(user = %username, "verification email sent"),
+                    Err(e) => tracing::error!(user = %username, "failed to send verification email: {e}"),
                 }
             });
         }
         None => {
-            tracing::info!(username = %username, "SMTP not configured; verification email not sent");
+            tracing::info!(user = %username, %ip, "SMTP not configured; verification email not sent");
             // The code itself only reaches the log in debug mode (HUSH_LOG=debug).
-            tracing::debug!(username = %username, "verification code (dev only): {code}");
+            tracing::debug!(user = %username, %ip, "verification code (dev only): {code}");
         }
     }
 
@@ -862,7 +869,7 @@ async fn verify_account(
         .await
         .map_err(internal)?;
         if burn {
-            tracing::warn!(%username, "verification code burned after too many failures");
+            tracing::warn!(user = %username, %ip, "verification code burned after too many failures");
         }
         return Err(bad_code());
     }
@@ -875,7 +882,7 @@ async fn verify_account(
     .execute(&state.db)
     .await
     .map_err(internal)?;
-    tracing::info!(username = %username, "account verified");
+    tracing::info!(user = %username, %ip, "account verified");
     Ok(Json(serde_json::json!({ "token": row.get::<String, _>(0) })))
 }
 
@@ -1009,7 +1016,7 @@ async fn login(
             .map_err(internal)?;
     }
 
-    tracing::info!(username = %username, device, "login succeeded");
+    tracing::info!(user = %username, %ip, device, "login succeeded");
     Ok(Json(serde_json::json!({ "token": token, "device_id": device })))
 }
 
@@ -1100,7 +1107,7 @@ async fn revoke_device(
     tx.commit().await.map_err(internal)?;
     // Drop its stream so the revoked device stops receiving immediately.
     state.live.lock().await.remove(&(auth.username.clone(), device));
-    tracing::info!(username = %auth.username, device, "device revoked");
+    tracing::info!(user = %auth.username, ip = %auth.ip, device, "device revoked");
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1132,7 +1139,7 @@ async fn forgot_password(
         .await
         .map_err(internal)?;
     let Some(row) = row else {
-        tracing::info!(%username, "password reset requested for unknown account");
+        tracing::info!(user = %username, %ip, "password reset requested for unknown account");
         return Ok(Json(serde_json::json!({ "status": "sent" })));
     };
 
@@ -1149,19 +1156,19 @@ async fn forgot_password(
     .map_err(internal)?;
 
     let email: String = row.get(0);
-    tracing::info!(%username, "password reset code generated");
+    tracing::info!(user = %username, %ip, "password reset code generated");
     match mail::MailConfig::from_env() {
         Some(cfg) => {
             let (email, username, code) = (email, username.clone(), code.clone());
             tokio::task::spawn_blocking(move || {
                 match cfg.send_password_reset(&email, &username, &code) {
-                    Ok(()) => tracing::info!(%username, "password reset email sent"),
-                    Err(e) => tracing::error!(%username, "failed to send password reset email: {e}"),
+                    Ok(()) => tracing::info!(user = %username, "password reset email sent"),
+                    Err(e) => tracing::error!(user = %username, "failed to send password reset email: {e}"),
                 }
             });
         }
         None => {
-            tracing::debug!(%username, "password reset code (dev only): {code}");
+            tracing::debug!(user = %username, %ip, "password reset code (dev only): {code}");
         }
     }
 
@@ -1262,7 +1269,7 @@ async fn reset_password(
     .map_err(internal)?;
 
     state.limits.reset(&format!("login:{username}"));
-    tracing::info!(%username, "password reset");
+    tracing::info!(user = %username, %ip, "password reset");
     Ok(Json(serde_json::json!({ "status": "reset" })))
 }
 
@@ -1315,7 +1322,7 @@ async fn update_me(
             .execute(&state.db)
             .await
             .map_err(internal)?;
-        tracing::debug!(user = %auth.username, "display name updated");
+        tracing::debug!(user = %auth.username, ip = %auth.ip, "display name updated");
     }
     if let Some(status) = &req.status {
         if !SETTABLE_STATUSES.contains(&status.as_str()) {
@@ -1327,7 +1334,7 @@ async fn update_me(
             .execute(&state.db)
             .await
             .map_err(internal)?;
-        tracing::debug!(user = %auth.username, %status, "presence updated");
+        tracing::debug!(user = %auth.username, ip = %auth.ip, %status, "presence updated");
     }
 
     if req.alias.is_some() || req.status.is_some() {
@@ -1469,7 +1476,7 @@ async fn request_contact(
         .limits
         .allow(&format!("contact:{}", auth.username), MAX_CONTACT_REQUESTS_PER_HOUR, HOUR, now_ms)
     {
-        tracing::warn!(user = %auth.username, "contact requests throttled");
+        tracing::warn!(user = %auth.username, ip = %auth.ip, "contact requests throttled");
         return Err(too_many());
     }
 
@@ -1485,7 +1492,7 @@ async fn request_contact(
             HOUR,
             now_ms,
         ) {
-            tracing::warn!(user = %auth.username, "possible username enumeration, throttled");
+            tracing::warn!(user = %auth.username, ip = %auth.ip, "possible username enumeration, throttled");
             return Err(too_many());
         }
         return Err(not_found());
@@ -1502,7 +1509,7 @@ async fn request_contact(
             "outgoing",
         )
         .await?;
-        tracing::debug!(from = %auth.username, to = %peer, "contact request to a blocker, ignored");
+        tracing::debug!(from = %auth.username, ip = %auth.ip, to = %peer, "contact request to a blocker, ignored");
         return Ok(Json(serde_json::json!({ "state": "outgoing" })));
     }
 
@@ -1540,7 +1547,7 @@ async fn request_contact(
 
     // Who added whom is exactly the social graph, so it stays at debug like
     // message metadata: an info-level log must not record it.
-    tracing::debug!(from = %auth.username, to = %peer, state = %resulting_state, "contact request");
+    tracing::debug!(from = %auth.username, ip = %auth.ip, to = %peer, state = %resulting_state, "contact request");
     notify_contacts_changed(&state, &peer).await;
     Ok(Json(serde_json::json!({ "state": resulting_state })))
 }
@@ -1560,7 +1567,7 @@ async fn accept_contact(
     set_link(&mut tx, &peer, &auth.username, "accepted").await?;
     tx.commit().await.map_err(internal)?;
 
-    tracing::debug!(user = %auth.username, peer = %peer, "contact accepted");
+    tracing::debug!(user = %auth.username, ip = %auth.ip, peer = %peer, "contact accepted");
     notify_contacts_changed(&state, &peer).await;
     Ok(Json(serde_json::json!({ "state": "accepted" })))
 }
@@ -1596,7 +1603,7 @@ async fn block_contact(
         .map_err(internal)?;
     tx.commit().await.map_err(internal)?;
 
-    tracing::debug!(user = %auth.username, peer = %peer, "contact blocked");
+    tracing::debug!(user = %auth.username, ip = %auth.ip, peer = %peer, "contact blocked");
     notify_contacts_changed(&state, &peer).await;
     Ok(Json(serde_json::json!({ "state": "blocked" })))
 }
@@ -1617,7 +1624,7 @@ async fn remove_contact(
         .execute(&state.db)
         .await
         .map_err(internal)?;
-    tracing::debug!(user = %auth.username, peer = %peer, "contact removed");
+    tracing::debug!(user = %auth.username, ip = %auth.ip, peer = %peer, "contact removed");
     notify_contacts_changed(&state, &peer).await;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1731,7 +1738,7 @@ async fn upload_keys(
             .await
             .map_err(internal)?;
         }
-        tracing::debug!(username = %auth.username, device = auth.device, "device identity published");
+        tracing::debug!(user = %auth.username, ip = %auth.ip, device = auth.device, "device identity published");
     }
     sqlx::query("DELETE FROM one_time_prekeys WHERE username = ? AND device = ?")
         .bind(&auth.username)
@@ -2021,7 +2028,7 @@ async fn send_message(
         }
     }
     tracing::debug!(
-        from = %auth.username,
+        from = %auth.username, ip = %auth.ip,
         to = %recipient,
         devices = copies.len(),
         %id,
@@ -2052,7 +2059,7 @@ async fn message_stream(
         .limits
         .allow(&format!("stream:{}", auth.username), 30, MINUTE, now())
     {
-        tracing::warn!(user = %auth.username, "too many reconnections, stream refused");
+        tracing::warn!(user = %auth.username, ip = %auth.ip, "too many reconnections, stream refused");
         return Err(too_many());
     }
 
@@ -2072,6 +2079,7 @@ async fn message_stream(
         db: state.db.clone(),
         username: auth.username.clone(),
         device: auth.device,
+        ip: auth.ip.clone(),
         id: listener_id,
     };
     // Coming online is a presence change for everyone watching.
@@ -2091,7 +2099,7 @@ async fn message_stream(
     .fetch_all(&state.db)
     .await
     .map_err(internal)?;
-    tracing::debug!(user = %auth.username, backlog = rows.len(), "event stream opened");
+    tracing::debug!(user = %auth.username, ip = %auth.ip, backlog = rows.len(), "event stream opened");
     tokio::spawn(async move {
         for r in rows {
             let msg = OutMessage {
@@ -2130,16 +2138,20 @@ struct LiveGuard {
     db: SqlitePool,
     username: String,
     device: i64,
+    /// Where the stream was opened from; the request is long gone by the time
+    /// this runs, and a disconnection is worth attributing.
+    ip: String,
     id: u64,
 }
 
 impl Drop for LiveGuard {
     fn drop(&mut self) {
-        let (live, db, username, device, id) = (
+        let (live, db, username, device, ip, id) = (
             self.live.clone(),
             self.db.clone(),
             self.username.clone(),
             self.device,
+            self.ip.clone(),
             self.id,
         );
         tokio::spawn(async move {
@@ -2149,7 +2161,7 @@ impl Drop for LiveGuard {
                 let mine = map.get(&key).is_some_and(|l| l.id == id);
                 if mine {
                     map.remove(&key);
-                    tracing::debug!(user = %username, device, "event stream closed");
+                    tracing::debug!(user = %username, %ip, device, "event stream closed");
                 }
                 mine
             };
@@ -2201,7 +2213,7 @@ async fn mark_read(
         },
     )
     .await;
-    tracing::debug!(user = %auth.username, id = %id, "message read");
+    tracing::debug!(user = %auth.username, ip = %auth.ip, id = %id, "message read");
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -2263,7 +2275,7 @@ async fn put_archive(
     .execute(&state.db)
     .await
     .map_err(internal)?;
-    tracing::debug!(user = %auth.username, id = %id, "history entry archived");
+    tracing::debug!(user = %auth.username, ip = %auth.ip, id = %id, "history entry archived");
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -2283,7 +2295,7 @@ async fn delete_archive_entry(
         .execute(&state.db)
         .await
         .map_err(internal)?;
-    tracing::debug!(user = %auth.username, id = %id, "history entry deleted");
+    tracing::debug!(user = %auth.username, ip = %auth.ip, id = %id, "history entry deleted");
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -2297,7 +2309,7 @@ async fn list_archive(
         .fetch_all(&state.db)
         .await
         .map_err(internal)?;
-    tracing::debug!(user = %auth.username, entries = rows.len(), "encrypted history downloaded");
+    tracing::debug!(user = %auth.username, ip = %auth.ip, entries = rows.len(), "encrypted history downloaded");
     let entries: Vec<serde_json::Value> = rows
         .iter()
         .map(|r| serde_json::json!({ "id": r.get::<String, _>(0), "blob": r.get::<String, _>(1) }))
@@ -2332,7 +2344,7 @@ async fn ack_message(
             .execute(&state.db)
             .await
             .map_err(internal)?;
-        tracing::debug!(user = %auth.username, id = %id, "undecryptable message discarded");
+        tracing::debug!(user = %auth.username, ip = %auth.ip, id = %id, "undecryptable message discarded");
         return Ok(StatusCode::NO_CONTENT);
     }
     // Remember who sent it before the row goes, so a later read receipt still
@@ -2386,7 +2398,7 @@ async fn ack_message(
         )
         .await;
     }
-    tracing::debug!(user = %auth.username, id = %id, "message acknowledged and deleted");
+    tracing::debug!(user = %auth.username, ip = %auth.ip, id = %id, "message acknowledged and deleted");
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -2399,11 +2411,36 @@ async fn ack_message(
 
 /// `Hush_1.0.2_x64-setup.exe`, and nothing else: the name is used to build a
 /// path, so it must not be able to point anywhere but that directory.
-fn installer_version(file_name: &str) -> Option<(u64, u64, u64)> {
-    let version = file_name
-        .strip_prefix("Hush_")?
-        .strip_suffix("_x64-setup.exe")?;
+/// How the build for each platform is named. A platform that is not listed
+/// has nothing to offer, and must be told so rather than handed the build for
+/// a different one: the signature would check out, and the client would
+/// install a Windows executable on a phone believing it came from us.
+const ARTIFACTS: &[(&str, &str, &str)] = &[
+    // Tauri asks with the target and arch of the running app.
+    ("windows", "x86_64", "_x64-setup.exe"),
+];
+
+fn artifact_suffix(target: &str, arch: &str) -> Option<&'static str> {
+    ARTIFACTS
+        .iter()
+        .find(|(t, a, _)| *t == target && *a == arch)
+        .map(|(_, _, suffix)| *suffix)
+}
+
+/// The version in `Hush_1.0.2_x64-setup.exe`, and nothing else: the name is
+/// used to build a path, so it must not be able to point anywhere but the
+/// directory of builds.
+fn installer_version(file_name: &str, suffix: &str) -> Option<(u64, u64, u64)> {
+    let version = file_name.strip_prefix("Hush_")?.strip_suffix(suffix)?;
     parse_version(version)
+}
+
+/// Whether the name is one this server would ever have offered, for any
+/// platform.
+fn is_known_artifact(file_name: &str) -> bool {
+    ARTIFACTS
+        .iter()
+        .any(|(_, _, suffix)| installer_version(file_name, suffix).is_some())
 }
 
 fn parse_version(version: &str) -> Option<(u64, u64, u64)> {
@@ -2419,12 +2456,12 @@ fn update_dir() -> Option<PathBuf> {
     (!dir.is_empty()).then(|| PathBuf::from(dir))
 }
 
-/// The newest installer available, as (version, file name).
-fn newest_installer(dir: &FsPath) -> Option<((u64, u64, u64), String)> {
+/// The newest build for one platform, as (version, file name).
+fn newest_installer(dir: &FsPath, suffix: &str) -> Option<((u64, u64, u64), String)> {
     let mut best: Option<((u64, u64, u64), String)> = None;
     for entry in std::fs::read_dir(dir).ok()?.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        let Some(version) = installer_version(&name) else {
+        let Some(version) = installer_version(&name, suffix) else {
             continue;
         };
         // Without the signature the client would refuse the download anyway.
@@ -2467,7 +2504,7 @@ fn public_base(headers: &axum::http::HeaderMap) -> String {
 /// Tells the client whether a newer build exists. 204 means "you are current",
 /// which is what the updater expects.
 async fn update_manifest(
-    Path((_target, _arch, current)): Path<(String, String, String)>,
+    Path((target, arch, current)): Path<(String, String, String)>,
     headers: axum::http::HeaderMap,
 ) -> Result<axum::response::Response, ApiError> {
     use axum::response::IntoResponse;
@@ -2478,7 +2515,12 @@ async fn update_manifest(
     let Some(current) = parse_version(current.trim_start_matches('v')) else {
         return Err(bad_request("invalid_request", "Invalid version"));
     };
-    let Some((version, file)) = newest_installer(&dir) else {
+    // No build for that platform means no update, never somebody else's build.
+    let Some(suffix) = artifact_suffix(&target, &arch) else {
+        tracing::debug!(%target, %arch, "update asked for a platform we do not build");
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    };
+    let Some((version, file)) = newest_installer(&dir, suffix) else {
         return Ok(StatusCode::NO_CONTENT.into_response());
     };
     if version <= current {
@@ -2516,7 +2558,7 @@ async fn update_download(Path(file): Path<String>) -> Result<axum::response::Res
     // Only a name this server itself would have offered, so the path cannot
     // escape the directory.
     let signature = file.strip_suffix(".sig").unwrap_or(&file);
-    if installer_version(signature).is_none() {
+    if !is_known_artifact(signature) {
         return Err(not_found());
     }
 
@@ -2536,10 +2578,15 @@ async fn update_download(Path(file): Path<String>) -> Result<axum::response::Res
 mod update_tests {
     use super::*;
 
+    const WINDOWS: &str = "_x64-setup.exe";
+
     #[test]
     fn only_our_own_installer_names_are_accepted() {
-        assert_eq!(installer_version("Hush_1.0.2_x64-setup.exe"), Some((1, 0, 2)));
-        assert_eq!(installer_version("Hush_10.20.30_x64-setup.exe"), Some((10, 20, 30)));
+        assert_eq!(installer_version("Hush_1.0.2_x64-setup.exe", WINDOWS), Some((1, 0, 2)));
+        assert_eq!(
+            installer_version("Hush_10.20.30_x64-setup.exe", WINDOWS),
+            Some((10, 20, 30))
+        );
 
         // Anything else must not resolve to a file: the name becomes a path.
         for name in [
@@ -2550,8 +2597,37 @@ mod update_tests {
             "Hush_1.0_x64-setup.exe",
             "Hush_1.0.2.3_x64-setup.exe",
             "Hush__x64-setup.exe",
+            // Not a build this server produces: the APK is installed by hand.
+            "Hush_1.0.6_arm64.apk",
         ] {
-            assert_eq!(installer_version(name), None, "{name} should be refused");
+            assert_eq!(installer_version(name, WINDOWS), None, "{name} should be refused");
+            assert!(!is_known_artifact(name), "{name} should not be downloadable");
+        }
+    }
+
+    /// The heart of it: a platform we do not build for gets nothing. Handing
+    /// it the Windows installer would be worse than useless — the signature
+    /// checks out, so the client cannot tell it was given the wrong thing.
+    #[test]
+    fn only_platforms_we_build_for_are_offered_anything() {
+        assert_eq!(artifact_suffix("windows", "x86_64"), Some(WINDOWS));
+
+        for (target, arch) in [
+            ("android", "arm64"),
+            ("android", "aarch64"),
+            ("linux", "x86_64"),
+            ("darwin", "aarch64"),
+            ("macos", "aarch64"),
+            ("windows", "aarch64"),
+            ("windows", "i686"),
+            ("invented", "whatever"),
+            ("", ""),
+        ] {
+            assert_eq!(
+                artifact_suffix(target, arch),
+                None,
+                "{target}/{arch} must not be offered a build"
+            );
         }
     }
 
@@ -2566,8 +2642,11 @@ mod update_tests {
         }
         // Unsigned builds are ignored: the client would refuse them anyway.
         std::fs::write(dir.join("Hush_2.0.0_x64-setup.exe"), b"installer").unwrap();
+        // An APK sitting in the same folder is not a Windows build.
+        std::fs::write(dir.join("Hush_3.0.0_arm64.apk"), b"apk").unwrap();
+        std::fs::write(dir.join("Hush_3.0.0_arm64.apk.sig"), b"signature").unwrap();
 
-        let (version, file) = newest_installer(&dir).unwrap();
+        let (version, file) = newest_installer(&dir, WINDOWS).unwrap();
         assert_eq!(version, (1, 1, 0));
         assert_eq!(file, "Hush_1.1.0_x64-setup.exe");
 

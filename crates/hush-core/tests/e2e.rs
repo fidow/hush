@@ -269,6 +269,61 @@ async fn a_profile_picture_reaches_contacts_encrypted() {
     }
 }
 
+/// A picture set before anyone is a contact still reaches them once they are.
+/// It is only sent when it changes, so without handing it over on acceptance
+/// a new contact would never see it.
+#[tokio::test]
+async fn a_picture_set_before_the_contact_existed_still_reaches_them() {
+    use hush_core::HushClient;
+
+    let (base, pool) = spawn_server().await;
+    let dir = std::env::temp_dir().join(format!("hush-avatar-late-{}", uuid::Uuid::new_v4()));
+
+    let alice = HushClient::spawn(dir.join("alice.db"));
+    alice
+        .register(&base, "alice", "Alicia", "alice@example.com", "supersecreta")
+        .await
+        .unwrap();
+    alice.verify(&pending_code(&pool, "alice").await).await.unwrap();
+    let bob = HushClient::spawn(dir.join("bob.db"));
+    bob.register(&base, "bob", "Roberto", "bob@example.com", "supersecreta")
+        .await
+        .unwrap();
+    bob.verify(&pending_code(&pool, "bob").await).await.unwrap();
+    alice.connect().await.unwrap();
+    bob.connect().await.unwrap();
+
+    // The picture comes first, with nobody to send it to.
+    let picture = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==";
+    alice.set_avatar(Some(picture.to_string())).await.unwrap();
+
+    // Only afterwards do they become contacts.
+    alice.request_contact("bob").await.unwrap();
+    bob.accept_contact("alice").await.unwrap();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        // Both sides refresh their lists, which is when the picture is handed
+        // over.
+        let _ = alice.contacts().await;
+        let seen = bob
+            .contacts()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.username == "alice")
+            .and_then(|c| c.avatar);
+        if seen.as_deref() == Some(picture) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a contact accepted later never received the picture"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
 /// Two devices of the same account, both signed in at once: each is written
 /// to separately, and what one sends shows up on the other.
 #[tokio::test]

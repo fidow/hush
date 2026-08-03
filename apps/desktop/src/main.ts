@@ -8,13 +8,17 @@ import { CATEGORIES, MAX_RECENT, RECENT_KEY } from "./emoji";
 import { applyTranslations, LANGUAGES, lang, setLang, t, tError, type Lang } from "./i18n";
 import { offerUpdate } from "./updates";
 import {
+  alertMode,
   alertUser,
   notificationsEnabled,
   playChime,
+  publishAlertMode,
   requestNotificationPermission,
+  setAlertMode,
   setNotificationsEnabled,
   setSoundEnabled,
   soundEnabled,
+  type AlertMode,
 } from "./notify";
 
 interface Message {
@@ -398,6 +402,7 @@ $("#conv-back").addEventListener("click", () => {
 
 async function selectContact(name: string) {
   if (contacts.get(name)?.state !== "accepted") return;
+  if (inSelectionMode()) exitSelection();
   showConversationPane(true);
   current = name;
   unread.delete(name);
@@ -477,6 +482,11 @@ function renderMessages() {
     }
     div.appendChild(meta);
     div.title = fullTime(msg.created_at);
+    if (inSelectionMode()) {
+      div.classList.add("selectable");
+      div.classList.toggle("selected", selection.has(msg.id));
+      div.addEventListener("click", () => toggleSelected(msg.id));
+    }
     container.appendChild(div);
   }
   container.scrollTop = container.scrollHeight;
@@ -661,17 +671,38 @@ async function checkForUpdate() {
 const IS_MOBILE = /android/i.test(navigator.userAgent);
 
 function hideDesktopOnly() {
-  if (!IS_MOBILE) return;
   for (const el of document.querySelectorAll<HTMLElement>(".desktop-only")) {
-    el.classList.add("hidden");
+    el.classList.toggle("hidden", IS_MOBILE);
+  }
+  for (const el of document.querySelectorAll<HTMLElement>(".mobile-only")) {
+    el.classList.toggle("hidden", !IS_MOBILE);
   }
 }
+
+const ALERT_MODES: AlertMode[] = ["sound", "vibrate", "none"];
+
+function populateAlertModes() {
+  const select = $("#settings-alerts") as HTMLSelectElement;
+  select.replaceChildren();
+  for (const mode of ALERT_MODES) {
+    const option = document.createElement("option");
+    option.value = mode;
+    option.textContent = t(`alerts.${mode}`);
+    select.appendChild(option);
+  }
+  select.value = alertMode();
+}
+
+$("#settings-alerts").addEventListener("change", (e) => {
+  setAlertMode((e.target as HTMLSelectElement).value as AlertMode);
+});
 
 async function boot() {
   hideDesktopOnly();
   // On a phone the notification permission has to be granted before the
   // messages that need it start arriving in the background.
   if (IS_MOBILE) void requestNotificationPermission();
+  publishAlertMode();
   applyTheme(currentTheme());
   applyFontSize(currentFontSize());
   applyCloseToTray(closeToTray());
@@ -679,6 +710,7 @@ async function boot() {
   populateLanguages();
   populateThemes();
   populateFontSizes();
+  populateAlertModes();
   applyTranslations();
   updateConversationPane();
   try {
@@ -815,6 +847,7 @@ function refreshLanguage(next: Lang) {
   applyTranslations();
   populateThemes();
   populateFontSizes();
+  populateAlertModes();
   updateConversationPane();
   for (const id of ["#lang-input", "#settings-lang"]) {
     ($(id) as HTMLSelectElement).value = next;
@@ -1582,6 +1615,114 @@ $("#emoji-btn").addEventListener("click", () => {
 
 let pendingDelete: string | null = null;
 
+// ---- Selección de varios mensajes ----
+//
+// Right-clicking a message offers "Select", which turns the conversation into
+// a picker: from then on a plain click marks or unmarks messages and the bar
+// at the top deletes every one of them at once.
+
+const selection = new Set<string>();
+
+function inSelectionMode(): boolean {
+  return !$("#selection-bar").classList.contains("hidden");
+}
+
+function enterSelection(id: string) {
+  selection.clear();
+  selection.add(id);
+  $("#selection-bar").classList.remove("hidden");
+  updateSelectionBar();
+  renderMessages();
+}
+
+function exitSelection() {
+  selection.clear();
+  $("#selection-bar").classList.add("hidden");
+  renderMessages();
+}
+
+function toggleSelected(id: string) {
+  if (selection.has(id)) {
+    selection.delete(id);
+  } else {
+    selection.add(id);
+  }
+  // Unpicking the last one leaves the mode: there is nothing to act on.
+  if (selection.size === 0) {
+    exitSelection();
+    return;
+  }
+  updateSelectionBar();
+  renderMessages();
+}
+
+function updateSelectionBar() {
+  $("#selection-count").textContent = t("select.count").replace(
+    "{n}",
+    String(selection.size),
+  );
+}
+
+$("#selection-cancel").addEventListener("click", exitSelection);
+
+$("#selection-delete").addEventListener("click", () => {
+  if (selection.size === 0) return;
+  const messages = current ? (contacts.get(current)?.messages ?? []) : [];
+  // "For everyone" only makes sense when every message picked is ours.
+  const allMine = [...selection].every((id) => messages.find((m) => m.id === id)?.mine);
+  ($("#delete-everyone") as HTMLButtonElement).classList.toggle("hidden", !allMine);
+  $("#delete-note").textContent = t(allMine ? "delete.note" : "delete.noteTheirs");
+  $("#delete-dialog").classList.remove("hidden");
+});
+
+/// Wipes a whole conversation, asking first whether our own messages should
+/// go from the other person's device as well.
+function askClearChat(name: string) {
+  const label = contactLabel(name);
+  askConfirm(
+    t("clear.title").replace("{who}", label),
+    t("clear.note"),
+    t("clear.mine"),
+    () => void clearChat(name, false),
+  );
+  // A second button on the same dialog would be the honest place for this,
+  // but the dialog takes one action; the wider option is offered after.
+  $("#confirm-ok").insertAdjacentElement("afterend", clearForEveryoneButton(name));
+}
+
+function clearForEveryoneButton(name: string): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "danger";
+  button.textContent = t("clear.everyone");
+  button.addEventListener("click", () => {
+    closeConfirm();
+    button.remove();
+    void clearChat(name, true);
+  });
+  return button;
+}
+
+async function clearChat(name: string, forEveryone: boolean) {
+  try {
+    const removed = await invoke<number>("delete_conversation", {
+      contact: name,
+      forEveryone,
+    });
+    const contact = contacts.get(name);
+    if (contact) {
+      contact.messages = [];
+      contact.loaded = true;
+    }
+    unread.delete(name);
+    renderMessages();
+    renderContactList();
+    toast(t("clear.done").replace("{n}", String(removed)));
+  } catch (err) {
+    toast(tError(err));
+  }
+}
+
 function askDelete(id: string) {
   const msg = current
     ? contacts.get(current)?.messages.find((m) => m.id === id)
@@ -1600,6 +1741,25 @@ function closeDeleteDialog() {
 }
 
 async function confirmDelete(forEveryone: boolean) {
+  // A selection takes precedence: the dialog was opened for all of it.
+  if (selection.size > 0) {
+    const ids = [...selection];
+    closeDeleteDialog();
+    exitSelection();
+    let failed = 0;
+    for (const id of ids) {
+      try {
+        await invoke("delete_message", { id, forEveryone });
+        removeMessageLocally(id);
+      } catch {
+        // One that cannot go must not stop the rest.
+        failed += 1;
+      }
+    }
+    if (failed > 0) toast(t("delete.someFailed").replace("{n}", String(failed)));
+    return;
+  }
+
   if (!pendingDelete) return;
   const id = pendingDelete;
   closeDeleteDialog();
@@ -1882,6 +2042,7 @@ document.addEventListener("contextmenu", (e) => {
       : [{ label: t("ctx.copyText"), action: () => copyText(bubble.textContent ?? "") }];
     items.push({ label: t("ctx.info"), action: () => showMessageInfo(id) });
     items.push({ label: t("ctx.delete"), action: () => askDelete(id) });
+    items.push({ label: t("ctx.select"), action: () => enterSelection(id) });
     showContextMenu(items, e.clientX, e.clientY);
     return;
   }
@@ -1892,6 +2053,11 @@ document.addEventListener("contextmenu", (e) => {
     const label = contactLabel(name);
     const blocked = contacts.get(name)?.state === "blocked";
     const items: CtxItem[] = [{ label: t("ctx.copyUser"), action: () => copyText(name) }];
+
+    items.push({
+      label: t("ctx.clearChat"),
+      action: () => askClearChat(name),
+    });
 
     if (blocked) {
       items.push({

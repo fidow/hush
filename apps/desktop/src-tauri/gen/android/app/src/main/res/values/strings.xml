@@ -6,4 +6,8 @@
     <string name="connection_channel_name">"Connection"</string>
     <string name="connection_title">"Hush"</string>
     <string name="connection_text">"Connected, waiting for messages"</string>
+    <!-- One channel per alert style; the user picks one in settings. -->
+    <string name="channel_messages_sound">"Messages"</string>
+    <string name="channel_messages_vibrate">"Messages (vibrate)"</string>
+    <string name="channel_messages_silent">"Messages (silent)"</string>
 </resources>
