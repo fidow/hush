@@ -159,15 +159,29 @@ fn dpapi(input: &[u8], protect: bool) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// On Android the key file lives in the app's private directory, which the
+/// system keeps other apps out of, and the whole partition is encrypted by the
+/// device. That is the protection here; binding the key to the hardware-backed
+/// keystore as well would need the app to call into Java.
+#[cfg(target_os = "android")]
+fn wrap_key(key: &[u8]) -> Result<Vec<u8>> {
+    Ok(key.to_vec())
+}
+
+#[cfg(target_os = "android")]
+fn unwrap_key(wrapped: &[u8]) -> Result<Vec<u8>> {
+    Ok(wrapped.to_vec())
+}
+
 /// Elsewhere the key is stored as-is; the platform hook goes here when the
-/// app grows beyond Windows.
-#[cfg(not(windows))]
+/// app grows beyond Windows and Android.
+#[cfg(not(any(windows, target_os = "android")))]
 fn wrap_key(key: &[u8]) -> Result<Vec<u8>> {
     tracing::warn!("no OS key protection on this platform; the device key is stored unwrapped");
     Ok(key.to_vec())
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "android")))]
 fn unwrap_key(wrapped: &[u8]) -> Result<Vec<u8>> {
     Ok(wrapped.to_vec())
 }

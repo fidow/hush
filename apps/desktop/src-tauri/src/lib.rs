@@ -6,7 +6,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use hush_core::{ClientEvent, ContactEntry, HushClient, ProfileInfo, StoredMessage};
+// The tray, and closing to it, exist on desktop only: Android has neither.
+#[cfg(desktop)]
 use tauri::menu::{Menu, MenuItem};
+#[cfg(desktop)]
 use tauri::tray::{TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, Manager, State, WindowEvent};
 
@@ -303,6 +306,7 @@ async fn get_history(
 
 /// Tray icon with a minimal menu. Clicking it brings the window back, which
 /// is what people try first after closing to the tray.
+#[cfg(desktop)]
 fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open", "Open Hush", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
@@ -368,6 +372,7 @@ fn notify(app: tauri::AppHandle, title: String, body: String) -> Result<(), Stri
     }
 }
 
+#[cfg(desktop)]
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
@@ -397,21 +402,24 @@ pub fn run() {
             app.manage(Arc::new(AtomicU64::new(0)));
 
             // Closing hides to the tray by default, so messages keep arriving
-            // and notifications still work. The UI can turn that off.
+            // and notifications still work. The UI can turn that off. On
+            // Android there is no tray and the system owns the lifecycle.
             let close_to_tray = Arc::new(AtomicBool::new(true));
             app.manage(CloseToTray(close_to_tray.clone()));
-            build_tray(app.handle())?;
-
-            if let Some(window) = app.get_webview_window("main") {
-                let handle = window.clone();
-                window.on_window_event(move |event| {
-                    if let WindowEvent::CloseRequested { api, .. } = event {
-                        if close_to_tray.load(Ordering::Relaxed) {
-                            api.prevent_close();
-                            let _ = handle.hide();
+            #[cfg(desktop)]
+            {
+                build_tray(app.handle())?;
+                if let Some(window) = app.get_webview_window("main") {
+                    let handle = window.clone();
+                    window.on_window_event(move |event| {
+                        if let WindowEvent::CloseRequested { api, .. } = event {
+                            if close_to_tray.load(Ordering::Relaxed) {
+                                api.prevent_close();
+                                let _ = handle.hide();
+                            }
                         }
-                    }
-                });
+                    });
+                }
             }
             Ok(())
         })

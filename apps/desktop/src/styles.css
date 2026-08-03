@@ -454,11 +454,58 @@ button.mini {
   border-bottom: 1px solid var(--border);
 }
 
+.conv-bar {
+  display: flex;
+  align-items: center;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+
 #conv-header {
   padding: 1rem;
   font-weight: 600;
-  background: var(--panel);
-  border-bottom: 1px solid var(--border);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The back button only means anything where the panes take turns. */
+#conv-back {
+  display: none;
+  font-size: 1.6rem;
+  padding: 0 0.6rem;
+  line-height: 1;
+}
+
+/* A phone, or a very narrow window: one pane at a time, the contact list
+   until a conversation is open and the conversation after that. */
+@media (max-width: 620px) {
+  .sidebar {
+    width: 100%;
+    border-right: none;
+  }
+
+  #chat.viewing-chat .sidebar,
+  #chat:not(.viewing-chat) .conversation {
+    display: none;
+  }
+
+  #conv-back {
+    display: block;
+  }
+
+  .bubble {
+    max-width: 85%;
+  }
+
+  .settings-card,
+  .dialog-card {
+    max-width: 100%;
+    max-height: 100%;
+    border-radius: 0;
+  }
 }
 
 /* With no conversation open the composer would invite writing into nowhere,

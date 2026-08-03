@@ -65,6 +65,7 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "chat.send": "Enviar",
     "chat.emojis": "Emojis",
     "chat.settings": "Ajustes",
+    "chat.back": "Volver a la lista",
     "chat.noRecentEmojis": "Aún no has usado emojis",
     "chat.recentEmojis": "Recientes",
 
@@ -312,6 +313,7 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "chat.send": "Send",
     "chat.emojis": "Emojis",
     "chat.settings": "Settings",
+    "chat.back": "Back to the list",
     "chat.noRecentEmojis": "No emojis used yet",
     "chat.recentEmojis": "Recent",
 

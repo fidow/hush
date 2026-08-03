@@ -7,3 +7,17 @@ dist/
 *.sqlite
 *.db
 .env
+
+# Signing material never belongs in the repository: whoever holds it can
+# publish an update, or an APK, that clients accept as ours.
+*.jks
+*.keystore
+keystore.properties
+hush-keystore.properties
+
+# Android build output and local Gradle state; the project itself is tracked.
+apps/desktop/src-tauri/gen/android/.gradle/
+apps/desktop/src-tauri/gen/android/build/
+apps/desktop/src-tauri/gen/android/app/build/
+apps/desktop/src-tauri/gen/android/app/src/main/jniLibs/
+apps/desktop/src-tauri/gen/android/local.properties

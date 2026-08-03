@@ -144,7 +144,11 @@
       </aside>
       <main class="conversation no-chat">
         <div id="conn-banner" class="conn-banner hidden" data-i18n="conn.offline"></div>
-        <header id="conv-header" data-i18n="chat.pickContact"></header>
+        <div class="conv-bar">
+          <!-- Only shown on a narrow screen, where the two panes take turns. -->
+          <button type="button" id="conv-back" class="icon-btn" data-i18n-title="chat.back">‹</button>
+          <header id="conv-header" data-i18n="chat.pickContact"></header>
+        </div>
 
         <!-- Visible only while no conversation is open. -->
         <div id="conv-empty" class="conv-empty">
@@ -193,7 +197,8 @@
           <input type="checkbox" id="settings-notifications" />
           <span data-i18n="settings.notifications"></span>
         </label>
-        <label class="toggle">
+        <!-- Desktop only: Android has no tray, the system owns the lifecycle. -->
+        <label class="toggle desktop-only">
           <input type="checkbox" id="settings-tray" />
           <span data-i18n="settings.closeToTray"></span>
         </label>

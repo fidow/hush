@@ -310,17 +310,31 @@ function updateConversationPane() {
 /// badly afterwards, when what you want to know is when they were around.
 function clockTime(timestamp: number): string {
   const date = new Date(timestamp);
-  const time = date.toLocaleTimeString(lang(), { hour: "2-digit", minute: "2-digit" });
+  const time = date.toLocaleTimeString(lang(), CLOCK);
   if (date.toDateString() === new Date().toDateString()) return time;
   const day = date.toLocaleDateString(lang(), { day: "numeric", month: "short" });
   return `${day}, ${time}`;
 }
 
-/// The same instant spelled out, timezone included, for the tooltip.
+/// 24-hour time everywhere, whatever the language: an English locale would
+/// otherwise print 2:32 PM.
+const CLOCK: Intl.DateTimeFormatOptions = {
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+};
+
+/// The same instant spelled out, timezone included, for the tooltip. Spelled
+/// out field by field: Intl refuses to mix dateStyle with a fixed hour cycle.
 function fullTime(timestamp: number): string {
   return new Date(timestamp).toLocaleString(lang(), {
-    dateStyle: "full",
-    timeStyle: "long",
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+    ...CLOCK,
+    second: "2-digit",
+    timeZoneName: "short",
   });
 }
 
@@ -341,8 +355,22 @@ function updateHeader() {
     contact?.status === "offline" && contact.lastSeen ? fullTime(contact.lastSeen) : "";
 }
 
+/// On a narrow screen the two panes take turns, so opening a conversation
+/// hides the contact list and going back brings it round again.
+function showConversationPane(open: boolean) {
+  $("#chat").classList.toggle("viewing-chat", open);
+}
+
+$("#conv-back").addEventListener("click", () => {
+  current = null;
+  showConversationPane(false);
+  updateConversationPane();
+  renderContactList();
+});
+
 async function selectContact(name: string) {
   if (contacts.get(name)?.state !== "accepted") return;
+  showConversationPane(true);
   current = name;
   unread.delete(name);
   document.querySelectorAll("#contact-list li").forEach((li) => {
@@ -584,6 +612,8 @@ async function enterChat(profile: ProfileInfo) {
 /// rather than installing silently: a restart in the middle of a conversation
 /// should not come as a surprise.
 async function checkForUpdate() {
+  // The updater installs a desktop package; Android updates through its APK.
+  if (IS_MOBILE) return;
   await offerUpdate(
     (version, notes) =>
       new Promise<boolean>((resolve) => {
@@ -599,7 +629,19 @@ async function checkForUpdate() {
   );
 }
 
+/// Android has no tray and updates itself through the store or a new APK, so
+/// the settings that only mean something on a desktop are hidden there.
+const IS_MOBILE = /android/i.test(navigator.userAgent);
+
+function hideDesktopOnly() {
+  if (!IS_MOBILE) return;
+  for (const el of document.querySelectorAll<HTMLElement>(".desktop-only")) {
+    el.classList.add("hidden");
+  }
+}
+
 async function boot() {
+  hideDesktopOnly();
   applyTheme(currentTheme());
   applyFontSize(currentFontSize());
   applyCloseToTray(closeToTray());
@@ -1531,8 +1573,10 @@ $("#confirm-ok").addEventListener("click", () => {
 function formatMoment(timestamp: number | null | undefined): string {
   if (!timestamp) return "—";
   return new Date(timestamp).toLocaleString(lang(), {
-    dateStyle: "medium",
-    timeStyle: "short",
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    ...CLOCK,
   });
 }
 
