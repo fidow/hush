@@ -3,6 +3,7 @@
 // The chime is synthesised with the Web Audio API rather than shipped as an
 // audio file: no asset to bundle, and nothing for the strict CSP to block.
 
+import { invoke } from "@tauri-apps/api/core";
 import {
   isPermissionGranted,
   requestPermission,
@@ -69,8 +70,18 @@ export function playChime() {
 }
 
 /// Shows a desktop notification if the user allows them.
+///
+/// It goes through our own command so the notification is attributed to Hush.
+/// The plugin is the fallback: it registers the app identity only for an
+/// installed build, so on Windows it can label the toast as PowerShell.
 export async function notify(title: string, body: string) {
   if (!notificationsEnabled()) return;
+  try {
+    await invoke("notify", { title, body });
+    return;
+  } catch {
+    // Fall through to the plugin.
+  }
   if (!(await ensurePermission())) return;
   try {
     sendNotification({ title, body });

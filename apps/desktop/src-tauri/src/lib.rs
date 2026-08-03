@@ -10,6 +10,9 @@ use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, Manager, State, WindowEvent};
 
+#[cfg(windows)]
+mod identity;
+
 /// Whether closing the window hides the app instead of quitting it. Lives in
 /// Rust because the close handler runs there, but the choice is the user's
 /// and the UI stores it.
@@ -306,6 +309,33 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+/// Shows a desktop notification under Hush's own identity.
+///
+/// The notification plugin only registers that identity for an installed
+/// build, so anything else — a copy run from disk, a dev build — ends up
+/// labelled PowerShell. Sending it here keeps the name right everywhere.
+#[tauri::command]
+fn notify(app: tauri::AppHandle, title: String, body: String) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        tauri_winrt_notification::Toast::new(&app.config().identifier)
+            .title(&title)
+            .text1(&body)
+            .show()
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(windows))]
+    {
+        use tauri_plugin_notification::NotificationExt;
+        app.notification()
+            .builder()
+            .title(title)
+            .body(body)
+            .show()
+            .map_err(|e| e.to_string())
+    }
+}
+
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
@@ -321,6 +351,8 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
+            #[cfg(windows)]
+            identity::register(&app.config().identifier, "Hush", &dir);
             // HUSH_PROFILE lets several instances coexist on one machine
             // (useful to test two accounts locally).
             let file = match std::env::var("HUSH_PROFILE") {
@@ -371,7 +403,8 @@ pub fn run() {
             restore_history,
             forgot_password,
             reset_password,
-            idle_seconds
+            idle_seconds,
+            notify
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

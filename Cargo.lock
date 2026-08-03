@@ -2322,7 +2322,7 @@ checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 
 [[package]]
 name = "hush-core"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2350,7 +2350,7 @@ dependencies = [
 
 [[package]]
 name = "hush-desktop"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "hush-core",
  "serde",
@@ -2359,13 +2359,14 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-notification",
  "tauri-plugin-opener",
+ "tauri-winrt-notification",
  "tokio",
  "windows-sys 0.59.0",
 ]
 
 [[package]]
 name = "hush-server"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "argon2",
