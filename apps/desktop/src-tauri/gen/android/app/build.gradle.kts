@@ -13,6 +13,24 @@ val tauriProperties = Properties().apply {
     }
 }
 
+// tauri.properties is written by `tauri android build`, which cannot finish on
+// Windows (it symlinks the compiled library, which Windows refuses outside
+// developer mode), and it is not tracked by git either. Reading the version
+// from tauri.conf.json means calling Gradle directly still stamps the right
+// one instead of a stale default.
+val appVersion: String = tauriProperties.getProperty("tauri.android.versionName")
+    ?: Regex("\"version\"\\s*:\\s*\"([^\"]+)\"")
+        .find(file("../../../tauri.conf.json").readText())
+        ?.groupValues?.get(1)
+    ?: "1.0.0"
+
+// A number that only ever grows: Android refuses to install an APK whose
+// version code is lower than the one already there.
+val appVersionCode: Int = tauriProperties.getProperty("tauri.android.versionCode")?.toInt()
+    ?: appVersion.split(".").map { it.filter(Char::isDigit).toIntOrNull() ?: 0 }
+        .let { (it + listOf(0, 0, 0)).take(3) }
+        .let { (major, minor, patch) -> major * 1_000_000 + minor * 1_000 + patch }
+
 // Signing details live outside the repository: the file is pointed at by
 // HUSH_ANDROID_KEYSTORE, or found next to the user's other Android keys.
 val keystoreProperties = Properties().apply {
@@ -32,8 +50,8 @@ android {
         applicationId = "com.fidow.hush"
         minSdk = 24
         targetSdk = 36
-        versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
-        versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
+        versionCode = appVersionCode
+        versionName = appVersion
     }
     signingConfigs {
         create("release") {
