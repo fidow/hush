@@ -135,6 +135,18 @@ impl LocalDb {
         }
     }
 
+    /// Whether a stored value is already sealed with this device's key.
+    ///
+    /// The migration has to be able to run twice: it may be interrupted, and a
+    /// database can hold sealed rows while the marker that says so is missing.
+    /// Sealing an already sealed value would make it unreadable for good.
+    pub(crate) fn already_sealed(&self, stored: &str) -> bool {
+        match &self.key {
+            Some(key) => key.open(stored).is_ok(),
+            None => false,
+        }
+    }
+
     pub(crate) fn open_bytes(&self, stored: &str) -> Result<Vec<u8>> {
         match &self.key {
             Some(key) => key.open(stored),
@@ -264,6 +276,9 @@ impl LocalDb {
         let mut sealed_rows = 0;
 
         for (id, text) in messages {
+            if self.already_sealed(&text) {
+                continue;
+            }
             let sealed = self.seal(&text)?;
             self.with(|c| {
                 c.execute(
@@ -275,6 +290,9 @@ impl LocalDb {
             sealed_rows += 1;
         }
         for (username, alias) in contacts {
+            if self.already_sealed(&alias) {
+                continue;
+            }
             let sealed = self.seal(&alias)?;
             self.with(|c| {
                 c.execute(
@@ -286,7 +304,7 @@ impl LocalDb {
             sealed_rows += 1;
         }
         for (key, value) in meta {
-            if !is_sealed_meta(&key) {
+            if !is_sealed_meta(&key) || self.already_sealed(&value) {
                 continue;
             }
             let sealed = self.seal(&value)?;
@@ -299,8 +317,20 @@ impl LocalDb {
             })?;
             sealed_rows += 1;
         }
-        for (table, key_col, value_col, key, blob) in stores {
-            let sealed = self.seal_bytes(&blob)?;
+        for (table, key_col, value_col, key, value) in stores {
+            let plaintext = match value {
+                // What the stores held before encryption: raw serialized
+                // records.
+                rusqlite::types::Value::Blob(bytes) => bytes,
+                // Already sealed by a run that did not get to write the
+                // marker, or by the app itself after an interrupted
+                // migration.
+                rusqlite::types::Value::Text(text) if self.already_sealed(&text) => continue,
+                rusqlite::types::Value::Text(text) => text.into_bytes(),
+                // Nothing else belongs in these columns.
+                _ => continue,
+            };
+            let sealed = self.seal_bytes(&plaintext)?;
             self.with(|c| {
                 c.execute(
                     &format!("UPDATE {table} SET {value_col} = ?1 WHERE {key_col} = ?2"),
@@ -315,14 +345,23 @@ impl LocalDb {
         Ok(sealed_rows)
     }
 
-    /// Rows of the libsignal stores, which hold private key material. They
-    /// were written as raw blobs before storage was encrypted, so they are
-    /// read as bytes here and rewritten sealed.
+    /// Rows of the libsignal stores, which hold private key material.
+    ///
+    /// The value comes back untyped: before encryption these columns held raw
+    /// blobs, after it they hold sealed text, and a database can contain
+    /// either when a migration was interrupted.
     #[allow(clippy::type_complexity)]
     fn collect_store_rows(
         &self,
-    ) -> Result<Vec<(&'static str, &'static str, &'static str, rusqlite::types::Value, Vec<u8>)>>
-    {
+    ) -> Result<
+        Vec<(
+            &'static str,
+            &'static str,
+            &'static str,
+            rusqlite::types::Value,
+            rusqlite::types::Value,
+        )>,
+    > {
         let tables: [(&'static str, &'static str, &'static str); 5] = [
             ("sessions", "address", "record"),
             ("identities", "address", "identity"),
@@ -333,14 +372,14 @@ impl LocalDb {
 
         let mut all = Vec::new();
         for (table, key_col, value_col) in tables {
-            let rows: Vec<(rusqlite::types::Value, Vec<u8>)> = self.with(|c| {
+            let rows: Vec<(rusqlite::types::Value, rusqlite::types::Value)> = self.with(|c| {
                 c.prepare(&format!("SELECT {key_col}, {value_col} FROM {table}"))?
                     .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
                     .collect()
             })?;
             all.extend(
                 rows.into_iter()
-                    .map(|(key, blob)| (table, key_col, value_col, key, blob)),
+                    .map(|(key, value)| (table, key_col, value_col, key, value)),
             );
         }
         Ok(all)
@@ -688,5 +727,64 @@ impl LocalDb {
             )
             .map(|v| v as u32)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A database whose rows are sealed but whose migration marker is gone —
+    /// an interrupted first run leaves exactly that — must open, and must not
+    /// encrypt everything a second time, which would make it unreadable.
+    #[test]
+    fn a_migration_that_runs_twice_leaves_the_data_readable() {
+        let dir = std::env::temp_dir().join(format!("hush-remigrate-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("hush.db");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("key"));
+
+        {
+            let db = LocalDb::open(&path).unwrap();
+            db.meta_set("archive_key", "la clave").unwrap();
+            db.upsert_contact("bob", "Roberto", "accepted").unwrap();
+            db.add_message(&StoredMessage {
+                id: "1".into(),
+                contact: "bob".into(),
+                mine: true,
+                kind: "text".into(),
+                text: "hola".into(),
+                state: "sent".into(),
+                delivered_at: None,
+                read_at: None,
+                created_at: 1,
+            })
+            .unwrap();
+            // Something the libsignal stores would have written, sealed.
+            let sealed = db.seal_bytes(b"un registro").unwrap();
+            db.with(|c| {
+                c.execute(
+                    "INSERT INTO sessions (address, record) VALUES ('bob:1', ?1)",
+                    params![sealed],
+                )
+                .map(|_| ())
+            })
+            .unwrap();
+            // The marker is what a crash between sealing and committing loses.
+            db.with(|c| c.execute("DELETE FROM meta WHERE key = 'crypto'", []).map(|_| ()))
+                .unwrap();
+        }
+
+        let db = LocalDb::open(&path).unwrap();
+        assert_eq!(db.meta_get("archive_key").unwrap().as_deref(), Some("la clave"));
+        assert_eq!(db.contacts().unwrap()[0].1, "Roberto");
+        assert_eq!(db.history("bob").unwrap()[0].text, "hola");
+        let record: String = db
+            .with(|c| c.query_row("SELECT record FROM sessions", [], |r| r.get(0)))
+            .unwrap();
+        assert_eq!(db.open_bytes(&record).unwrap(), b"un registro");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

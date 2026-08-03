@@ -679,6 +679,13 @@ function populateServers() {
     const showUrl = () => ($(urlId).textContent = select.value);
     select.addEventListener("change", showUrl);
     showUrl();
+
+    // With a single server there is nothing to choose: the field would only
+    // ask the user a question with one answer. The selector comes back on its
+    // own the day a second one is listed.
+    if (SERVERS.length < 2) {
+      select.closest("label")?.classList.add("hidden");
+    }
   }
 }
 
