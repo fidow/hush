@@ -92,7 +92,10 @@
 body {
   background: var(--bg);
   color: var(--text);
+  /* dvh follows the window as the on-screen keyboard opens and closes; vh
+     stays behind for anything that does not know the unit. */
   height: 100vh;
+  height: 100dvh;
   overflow: hidden;
   user-select: none;
 }
@@ -103,6 +106,7 @@ body {
 
 .screen {
   height: 100vh;
+  height: 100dvh;
 }
 
 /* ---- Login / verificación ---- */

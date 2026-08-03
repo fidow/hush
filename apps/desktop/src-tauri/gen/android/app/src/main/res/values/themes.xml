@@ -1,6 +1,8 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
-    <!-- Base application theme. -->
+    <!-- Base application theme. The window background is what shows through
+         the strips left for the status and navigation bars, so it matches the
+         interface instead of flashing white. -->
     <style name="Theme.hush_desktop" parent="Theme.MaterialComponents.DayNight.NoActionBar">
-        <!-- Customize your theme here. -->
+        <item name="android:windowBackground">@color/hush_background</item>
     </style>
 </resources>

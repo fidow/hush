@@ -1,6 +1,7 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
-    <!-- Base application theme. -->
+    <!-- Same as the day theme; the background colour itself is what changes,
+         through values-night/colors.xml. -->
     <style name="Theme.hush_desktop" parent="Theme.MaterialComponents.DayNight.NoActionBar">
-        <!-- Customize your theme here. -->
+        <item name="android:windowBackground">@color/hush_background</item>
     </style>
 </resources>
