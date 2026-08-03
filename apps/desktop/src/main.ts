@@ -438,10 +438,7 @@ function renderMessages() {
     meta.className = "meta";
     const clock = document.createElement("span");
     clock.className = "clock";
-    clock.textContent = new Date(msg.created_at).toLocaleTimeString(lang(), {
-      hour: "2-digit",
-      minute: "2-digit",
-    });
+    clock.textContent = new Date(msg.created_at).toLocaleTimeString(lang(), CLOCK);
     meta.appendChild(clock);
     if (msg.mine) {
       const ticks = document.createElement("span");

@@ -219,12 +219,20 @@ impl LocalDb {
         }
         self.with(|c| c.execute_batch("BEGIN IMMEDIATE"))?;
         match self.seal_existing_rows() {
-            Ok(()) => {
+            Ok(sealed) => {
                 self.with(|c| c.execute_batch("COMMIT"))?;
-                // The updated rows land on new pages; without this the old
-                // plaintext survives in the freed ones.
-                self.with(|c| c.execute_batch("VACUUM"))?;
-                tracing::info!("local storage encrypted with this device's key");
+                // The updated rows land on new pages, and the old plaintext
+                // would survive in the freed ones. A database that had nothing
+                // to seal has nothing to reclaim, and a VACUUM that fails —
+                // it needs somewhere to write a temporary file, which is not a
+                // given on every platform — must not stop the app: the data is
+                // already encrypted by this point.
+                if sealed > 0 {
+                    if let Err(e) = self.with(|c| c.execute_batch("VACUUM")) {
+                        tracing::warn!("could not compact the database after encrypting it: {e}");
+                    }
+                    tracing::info!("local storage encrypted with this device's key");
+                }
                 Ok(())
             }
             Err(e) => {
@@ -234,7 +242,9 @@ impl LocalDb {
         }
     }
 
-    fn seal_existing_rows(&self) -> Result<()> {
+    /// Returns how many rows were sealed, so the caller knows whether the
+    /// file holds freed pages worth reclaiming.
+    fn seal_existing_rows(&self) -> Result<usize> {
         let messages: Vec<(String, String)> = self.with(|c| {
             c.prepare("SELECT id, text FROM messages")?
                 .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
@@ -251,6 +261,7 @@ impl LocalDb {
                 .collect()
         })?;
         let stores = self.collect_store_rows()?;
+        let mut sealed_rows = 0;
 
         for (id, text) in messages {
             let sealed = self.seal(&text)?;
@@ -261,6 +272,7 @@ impl LocalDb {
                 )
                 .map(|_| ())
             })?;
+            sealed_rows += 1;
         }
         for (username, alias) in contacts {
             let sealed = self.seal(&alias)?;
@@ -271,6 +283,7 @@ impl LocalDb {
                 )
                 .map(|_| ())
             })?;
+            sealed_rows += 1;
         }
         for (key, value) in meta {
             if !is_sealed_meta(&key) {
@@ -284,6 +297,7 @@ impl LocalDb {
                 )
                 .map(|_| ())
             })?;
+            sealed_rows += 1;
         }
         for (table, key_col, value_col, key, blob) in stores {
             let sealed = self.seal_bytes(&blob)?;
@@ -294,10 +308,11 @@ impl LocalDb {
                 )
                 .map(|_| ())
             })?;
+            sealed_rows += 1;
         }
 
         self.meta_set_raw("crypto", "v1")?;
-        Ok(())
+        Ok(sealed_rows)
     }
 
     /// Rows of the libsignal stores, which hold private key material. They

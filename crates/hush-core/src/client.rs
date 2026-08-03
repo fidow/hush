@@ -200,6 +200,9 @@ enum Command {
 #[derive(Clone)]
 pub struct HushClient {
     tx: mpsc::Sender<Command>,
+    /// Why the engine thread stopped, if it did. Without it every call after
+    /// a crash reads "engine closed", which says nothing about the cause.
+    fatal: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl HushClient {
@@ -207,17 +210,40 @@ impl HushClient {
     /// file holding all local state (identity, sessions, history).
     pub fn spawn(db_path: PathBuf) -> Self {
         let (tx, rx) = mpsc::channel(64);
+        let fatal = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let reported = fatal.clone();
         std::thread::Builder::new()
             .name("hush-engine".into())
             .spawn(move || {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("build engine runtime");
-                rt.block_on(actor(db_path, rx));
+                // A panic in here would otherwise just close the channel, and
+                // the app would report nothing but "engine closed".
+                let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("build engine runtime");
+                    rt.block_on(actor(db_path, rx));
+                }));
+                if let Err(panic) = crashed {
+                    let reason = panic
+                        .downcast_ref::<String>()
+                        .cloned()
+                        .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
+                        .unwrap_or_else(|| "the engine stopped unexpectedly".to_string());
+                    tracing::error!("engine thread panicked: {reason}");
+                    *reported.lock().expect("fatal slot") = Some(reason);
+                }
             })
             .expect("spawn engine thread");
-        Self { tx }
+        Self { tx, fatal }
+    }
+
+    /// What went wrong, when the engine is no longer answering.
+    fn closed(&self) -> String {
+        match self.fatal.lock().expect("fatal slot").clone() {
+            Some(reason) => reason,
+            None => "engine closed".to_string(),
+        }
     }
 
     async fn request<T>(
@@ -225,11 +251,8 @@ impl HushClient {
         make: impl FnOnce(oneshot::Sender<Result<T, String>>) -> Command,
     ) -> Result<T, String> {
         let (reply, rx) = oneshot::channel();
-        self.tx
-            .send(make(reply))
-            .await
-            .map_err(|_| "engine closed".to_string())?;
-        rx.await.map_err(|_| "engine closed".to_string())?
+        self.tx.send(make(reply)).await.map_err(|_| self.closed())?;
+        rx.await.map_err(|_| self.closed())?
     }
 
     /// The account stored on this device, if any.
@@ -1147,11 +1170,46 @@ impl Actor {
     }
 }
 
+/// Answers every command with the same failure, so a broken start shows the
+/// user what is wrong instead of an empty channel.
+async fn report_fatal(mut commands: mpsc::Receiver<Command>, reason: String) {
+    while let Some(command) = commands.recv().await {
+        match command {
+            Command::LoadProfile { reply } => drop(reply.send(Err(reason.clone()))),
+            Command::Register { reply, .. } => drop(reply.send(Err(reason.clone()))),
+            Command::Verify { reply, .. } => drop(reply.send(Err(reason.clone()))),
+            Command::Login { reply, .. } => drop(reply.send(Err(reason.clone()))),
+            Command::ForgotPassword { reply, .. } => drop(reply.send(Err(reason.clone()))),
+            Command::ResetPassword { reply, .. } => drop(reply.send(Err(reason.clone()))),
+            Command::RecoveryCode { reply } => drop(reply.send(Err(reason.clone()))),
+            Command::RestoreHistory { reply, .. } => drop(reply.send(Err(reason.clone()))),
+            Command::Connect { reply } => drop(reply.send(Err(reason.clone()))),
+            Command::Send { reply, .. } => drop(reply.send(Err(reason.clone()))),
+            Command::RequestContact { reply, .. } => drop(reply.send(Err(reason.clone()))),
+            Command::AcceptContact { reply, .. } => drop(reply.send(Err(reason.clone()))),
+            Command::RemoveContact { reply, .. } => drop(reply.send(Err(reason.clone()))),
+            Command::BlockContact { reply, .. } => drop(reply.send(Err(reason.clone()))),
+            Command::DeleteMessage { reply, .. } => drop(reply.send(Err(reason.clone()))),
+            Command::Contacts { reply } => drop(reply.send(Err(reason.clone()))),
+            Command::Devices { reply } => drop(reply.send(Err(reason.clone()))),
+            Command::RevokeDevice { reply, .. } => drop(reply.send(Err(reason.clone()))),
+            Command::History { reply, .. } => drop(reply.send(Err(reason.clone()))),
+            Command::MarkRead { reply, .. } => drop(reply.send(Err(reason.clone()))),
+            Command::UpdateMe { reply, .. } => drop(reply.send(Err(reason.clone()))),
+        }
+    }
+}
+
 async fn actor(db_path: PathBuf, mut commands: mpsc::Receiver<Command>) {
     let db = match LocalDb::open(&db_path) {
         Ok(db) => db,
         Err(e) => {
-            tracing::error!("cannot open local db {db_path:?}: {e}");
+            // Dying here would close the channel, and every call would come
+            // back as "engine closed" with no hint of what actually went
+            // wrong. Stay up and hand the real reason to whoever asks.
+            let reason = format!("cannot open local storage at {}: {e:#}", db_path.display());
+            tracing::error!("{reason}");
+            report_fatal(commands, reason).await;
             return;
         }
     };
