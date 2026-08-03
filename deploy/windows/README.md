@@ -46,12 +46,23 @@ files at startup and once a day. It only deletes files it generated, so it is
 safe to point at a folder shared with other logs. Without `HUSH_LOG_FILE` the
 server writes to the console, which as a scheduled task means losing the log.
 
-**4. Start it at boot** and restart it if it dies. `install-service.ps1` does
+**4. Create the updates folder** that `HUSH_UPDATE_DIR` points at, and drop
+the client installer and its signature there — `Hush_1.0.2_x64-setup.exe` and
+`Hush_1.0.2_x64-setup.exe.sig`, both from the release. The app checks on start
+and offers the highest version it finds, so publishing a new client is a matter
+of copying those two files in. An optional `notes.txt` in the same folder is
+shown to the user when the update is offered.
+
+An installer without its `.sig` is ignored: clients verify the signature
+against a key built into the app, so an unsigned file would be refused anyway.
+Leave `HUSH_UPDATE_DIR` unset to turn updates off.
+
+**5. Start it at boot** and restart it if it dies. `install-service.ps1` does
 this with Task Scheduler; NSSM or any other supervisor works just as well. It
 is not a native Windows service — it is a plain executable, so it needs a
 wrapper.
 
-**5. Do not open port 8080 on the firewall.** External access comes in through
+**6. Do not open port 8080 on the firewall.** External access comes in through
 Apache.
 
 ---

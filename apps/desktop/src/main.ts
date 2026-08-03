@@ -6,6 +6,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { CATEGORIES, MAX_RECENT, RECENT_KEY } from "./emoji";
 import { applyTranslations, LANGUAGES, lang, setLang, t, tError, type Lang } from "./i18n";
+import { offerUpdate } from "./updates";
 import {
   alertUser,
   notificationsEnabled,
@@ -468,7 +469,6 @@ let lastActivity = Date.now();
 async function applyStatus(status: string) {
   myStatus = status;
   renderMyStatus();
-  ($("#settings-status") as HTMLSelectElement).value = status;
   try {
     await invoke("update_me", { alias: null, status });
   } catch {
@@ -577,6 +577,26 @@ async function enterChat(profile: ProfileInfo) {
   // Presence and request states come with the contact list.
   setInterval(refreshContacts, PRESENCE_POLL_MS);
   setInterval(checkIdle, IDLE_CHECK_MS);
+  void checkForUpdate();
+}
+
+/// Offers the newer version the server publishes, if there is one. Asking
+/// rather than installing silently: a restart in the middle of a conversation
+/// should not come as a surprise.
+async function checkForUpdate() {
+  await offerUpdate(
+    (version, notes) =>
+      new Promise<boolean>((resolve) => {
+        askConfirm(
+          t("update.title").replace("{version}", version),
+          notes.trim() || t("update.note"),
+          t("update.install"),
+          () => resolve(true),
+          () => resolve(false),
+        );
+      }),
+    (message) => toast(message),
+  );
 }
 
 async function boot() {
@@ -587,7 +607,6 @@ async function boot() {
   populateLanguages();
   populateThemes();
   populateFontSizes();
-  populateStatuses();
   applyTranslations();
   updateConversationPane();
   try {
@@ -711,26 +730,13 @@ function populateLanguages() {
   }
 }
 
-function populateStatuses() {
-  const select = $("#settings-status") as HTMLSelectElement;
-  select.replaceChildren();
-  for (const status of SETTABLE_STATUSES) {
-    const option = document.createElement("option");
-    option.value = status;
-    option.textContent = t(`status.${status}`);
-    select.appendChild(option);
-  }
-}
-
 /// Re-renders every piece of text after a language change.
 function refreshLanguage(next: Lang) {
   setLang(next);
   applyTranslations();
-  populateStatuses();
   populateThemes();
   populateFontSizes();
   updateConversationPane();
-  ($("#settings-status") as HTMLSelectElement).value = myStatus;
   for (const id of ["#lang-input", "#settings-lang"]) {
     ($(id) as HTMLSelectElement).value = next;
   }
@@ -773,7 +779,6 @@ $("#me-status-btn").addEventListener("click", (e) => {
 
 $("#settings-btn").addEventListener("click", () => {
   ($("#settings-alias") as HTMLInputElement).value = myAlias;
-  ($("#settings-status") as HTMLSelectElement).value = myStatus;
   ($("#settings-lang") as HTMLSelectElement).value = lang();
   void fillAbout();
   ($("#settings-notifications") as HTMLInputElement).checked = notificationsEnabled();
@@ -907,22 +912,16 @@ $("#restore-btn").addEventListener("click", async () => {
 $("#settings-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const alias = ($("#settings-alias") as HTMLInputElement).value.trim();
-  const status = ($("#settings-status") as HTMLSelectElement).value;
   const btn = $("#settings-save") as HTMLButtonElement;
   btn.disabled = true;
   $("#settings-error").textContent = "";
   try {
     await invoke("update_me", {
       alias: alias !== myAlias ? alias : null,
-      status: status !== myStatus ? status : null,
+      status: null,
     });
     myAlias = alias;
-    myStatus = status;
-    // A hand-picked status ends any automatic absence.
-    autoAway = false;
-    lastActivity = Date.now();
     $("#me-alias").textContent = myAlias;
-    renderMyStatus();
     $("#settings").classList.add("hidden");
     toast(t("settings.saved"));
   } catch (err) {
@@ -1400,24 +1399,38 @@ listen<{ old_id: string; new_id: string }>("hush://resent", ({ payload }) => {
 // ---- Confirmación genérica ----
 
 let confirmAction: (() => void) | null = null;
+/// Runs when the dialog is closed without confirming, so a caller waiting on
+/// an answer gets one either way.
+let confirmDismiss: (() => void) | null = null;
 
-function askConfirm(title: string, note: string, okLabel: string, action: () => void) {
+function askConfirm(
+  title: string,
+  note: string,
+  okLabel: string,
+  action: () => void,
+  onDismiss?: () => void,
+) {
   $("#confirm-title").textContent = title;
   $("#confirm-note").textContent = note;
   $("#confirm-ok").textContent = okLabel;
   confirmAction = action;
+  confirmDismiss = onDismiss ?? null;
   $("#confirm-dialog").classList.remove("hidden");
 }
 
 function closeConfirm() {
+  const dismissed = confirmDismiss;
   confirmAction = null;
+  confirmDismiss = null;
   $("#confirm-dialog").classList.add("hidden");
+  dismissed?.();
 }
 
 $("#confirm-close").addEventListener("click", closeConfirm);
 $("#confirm-cancel").addEventListener("click", closeConfirm);
 $("#confirm-ok").addEventListener("click", () => {
   const action = confirmAction;
+  confirmDismiss = null;
   closeConfirm();
   action?.();
 });

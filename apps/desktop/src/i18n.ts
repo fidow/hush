@@ -124,6 +124,13 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "about.encryption": "Cifrado",
     "about.license": "Licencia",
     "about.website": "Sitio web",
+
+    "update.title": "Versión {version} disponible",
+    "update.note": "Hay una versión nueva de Hush lista para instalar.",
+    "update.install": "Actualizar",
+    "update.downloading": "Descargando la actualización…",
+    "update.restarting": "Reiniciando Hush…",
+    "update.failed": "No se pudo actualizar",
     "about.note":
       "Los mensajes van cifrados de extremo a extremo: el servidor solo transporta datos que no puede leer. El intercambio de claves es resistente a computación cuántica, y lo que se guarda en este equipo está cifrado con una clave propia del dispositivo.",
 
@@ -349,6 +356,13 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "about.encryption": "Encryption",
     "about.license": "Licence",
     "about.website": "Website",
+
+    "update.title": "Version {version} available",
+    "update.note": "A new version of Hush is ready to install.",
+    "update.install": "Update",
+    "update.downloading": "Downloading the update…",
+    "update.restarting": "Restarting Hush…",
+    "update.failed": "The update failed",
     "about.note":
       "Messages are end-to-end encrypted: the server only carries data it cannot read. The key exchange is quantum-resistant, and whatever is stored on this computer is encrypted with a key belonging to this device.",
 

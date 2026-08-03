@@ -99,6 +99,15 @@ available again from settings. It is deliberately separate from the login
 password, which the server does see during authentication. Losing it means
 losing the archive — there is no recovery path by design.
 
+### Updates
+
+The client checks `/v1/update/{target}/{arch}/{version}` on start and offers
+what the server publishes from `HUSH_UPDATE_DIR`. The installer is verified
+against a minisign public key built into the app, so the server can only offer
+builds the developer signed; a compromised server cannot push its own. The
+private key lives outside the repository and signs the artefacts at build time
+(`TAURI_SIGNING_PRIVATE_KEY`).
+
 ### Local storage
 
 The client database is not a place where plaintext survives either: message

@@ -5,6 +5,7 @@ pub mod mail;
 pub mod ratelimit;
 
 use std::net::SocketAddr;
+use std::path::{Path as FsPath, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{collections::HashMap, convert::Infallible, sync::Arc};
 
@@ -252,6 +253,13 @@ pub fn app(db: SqlitePool) -> Router {
             "/v1/archive/{id}",
             put(put_archive).delete(delete_archive_entry),
         )
+        // Updates are public: a client that cannot sign in still has to be
+        // able to update, and the installer is signed anyway.
+        .route(
+            "/v1/update/{target}/{arch}/{current}",
+            get(update_manifest),
+        )
+        .route("/v1/update/download/{file}", get(update_download))
         // Encrypted envelopes carrying inline images can be several MB.
         .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY_BYTES))
         // Outermost, so it runs before routing: see `read_body_first`.
@@ -1858,4 +1866,189 @@ async fn ack_message(
     }
     tracing::debug!(user = %auth.username, id = %id, "message acknowledged and deleted");
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---- Client updates -------------------------------------------------------
+//
+// The deployment drops the installer and its signature into HUSH_UPDATE_DIR;
+// the server offers the newest one it finds there. Nothing here is trusted by
+// the client on its own: the installer is verified against the public key
+// built into the app, so a tampered file is refused.
+
+/// `Hush_1.0.2_x64-setup.exe`, and nothing else: the name is used to build a
+/// path, so it must not be able to point anywhere but that directory.
+fn installer_version(file_name: &str) -> Option<(u64, u64, u64)> {
+    let version = file_name
+        .strip_prefix("Hush_")?
+        .strip_suffix("_x64-setup.exe")?;
+    parse_version(version)
+}
+
+fn parse_version(version: &str) -> Option<(u64, u64, u64)> {
+    let mut parts = version.split('.');
+    let mut next = || parts.next()?.parse::<u64>().ok();
+    let parsed = (next()?, next()?, next()?);
+    parts.next().is_none().then_some(parsed)
+}
+
+fn update_dir() -> Option<PathBuf> {
+    let dir = std::env::var("HUSH_UPDATE_DIR").ok()?;
+    let dir = dir.trim();
+    (!dir.is_empty()).then(|| PathBuf::from(dir))
+}
+
+/// The newest installer available, as (version, file name).
+fn newest_installer(dir: &FsPath) -> Option<((u64, u64, u64), String)> {
+    let mut best: Option<((u64, u64, u64), String)> = None;
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(version) = installer_version(&name) else {
+            continue;
+        };
+        // Without the signature the client would refuse the download anyway.
+        if !dir.join(format!("{name}.sig")).exists() {
+            tracing::warn!("{name} has no signature and is ignored");
+            continue;
+        }
+        if best.as_ref().is_none_or(|(best, _)| version > *best) {
+            best = Some((version, name));
+        }
+    }
+    best
+}
+
+/// Where clients should fetch the installer from. Built from the request so
+/// the deployment needs no extra configuration, unless HUSH_PUBLIC_URL says
+/// otherwise.
+fn public_base(headers: &axum::http::HeaderMap) -> String {
+    if let Ok(base) = std::env::var("HUSH_PUBLIC_URL") {
+        let base = base.trim().trim_end_matches('/');
+        if !base.is_empty() {
+            return base.to_string();
+        }
+    }
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("127.0.0.1:8080");
+    let scheme = headers
+        .get("x-forwarded-proto")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or(if host.starts_with("127.0.0.1") || host.starts_with("localhost") {
+            "http"
+        } else {
+            "https"
+        });
+    format!("{scheme}://{host}")
+}
+
+/// Tells the client whether a newer build exists. 204 means "you are current",
+/// which is what the updater expects.
+async fn update_manifest(
+    Path((_target, _arch, current)): Path<(String, String, String)>,
+    headers: axum::http::HeaderMap,
+) -> Result<axum::response::Response, ApiError> {
+    use axum::response::IntoResponse;
+
+    let Some(dir) = update_dir() else {
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    };
+    let Some(current) = parse_version(current.trim_start_matches('v')) else {
+        return Err(bad_request("invalid_request", "Invalid version"));
+    };
+    let Some((version, file)) = newest_installer(&dir) else {
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    };
+    if version <= current {
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    }
+
+    let signature = match std::fs::read_to_string(dir.join(format!("{file}.sig"))) {
+        Ok(signature) => signature.trim().to_string(),
+        Err(e) => {
+            tracing::error!("cannot read the signature of {file}: {e}");
+            return Err(internal(e));
+        }
+    };
+    let notes = std::fs::read_to_string(dir.join("notes.txt"))
+        .map(|n| n.trim().to_string())
+        .unwrap_or_default();
+    let (major, minor, patch) = version;
+
+    tracing::debug!(%file, "offering an update");
+    Ok(Json(serde_json::json!({
+        "version": format!("{major}.{minor}.{patch}"),
+        "notes": notes,
+        "url": format!("{}/v1/update/download/{file}", public_base(&headers)),
+        "signature": signature,
+    }))
+    .into_response())
+}
+
+async fn update_download(Path(file): Path<String>) -> Result<axum::response::Response, ApiError> {
+    use axum::response::IntoResponse;
+
+    let Some(dir) = update_dir() else {
+        return Err(not_found());
+    };
+    // Only a name this server itself would have offered, so the path cannot
+    // escape the directory.
+    let signature = file.strip_suffix(".sig").unwrap_or(&file);
+    if installer_version(signature).is_none() {
+        return Err(not_found());
+    }
+
+    let bytes = std::fs::read(dir.join(&file)).map_err(|_| not_found())?;
+    tracing::debug!(%file, "serving an update download");
+    Ok((
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/octet-stream",
+        )],
+        bytes,
+    )
+        .into_response())
+}
+
+#[cfg(test)]
+mod update_tests {
+    use super::*;
+
+    #[test]
+    fn only_our_own_installer_names_are_accepted() {
+        assert_eq!(installer_version("Hush_1.0.2_x64-setup.exe"), Some((1, 0, 2)));
+        assert_eq!(installer_version("Hush_10.20.30_x64-setup.exe"), Some((10, 20, 30)));
+
+        // Anything else must not resolve to a file: the name becomes a path.
+        for name in [
+            "hush.sqlite3",
+            "../hush.sqlite3",
+            "Hush_1.0.2_x64-setup.exe.bak",
+            r"Hush_../..\1.0.2_x64-setup.exe",
+            "Hush_1.0_x64-setup.exe",
+            "Hush_1.0.2.3_x64-setup.exe",
+            "Hush__x64-setup.exe",
+        ] {
+            assert_eq!(installer_version(name), None, "{name} should be refused");
+        }
+    }
+
+    #[test]
+    fn the_newest_build_in_the_folder_wins() {
+        let dir = std::env::temp_dir().join(format!("hush-updates-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for version in ["1.0.2", "1.0.10", "1.1.0"] {
+            let file = dir.join(format!("Hush_{version}_x64-setup.exe"));
+            std::fs::write(&file, b"installer").unwrap();
+            std::fs::write(format!("{}.sig", file.display()), b"signature").unwrap();
+        }
+        // Unsigned builds are ignored: the client would refuse them anyway.
+        std::fs::write(dir.join("Hush_2.0.0_x64-setup.exe"), b"installer").unwrap();
+
+        let (version, file) = newest_installer(&dir).unwrap();
+        assert_eq!(version, (1, 1, 0));
+        assert_eq!(file, "Hush_1.1.0_x64-setup.exe");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
