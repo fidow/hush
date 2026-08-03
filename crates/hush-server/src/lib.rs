@@ -531,16 +531,47 @@ async fn read_body_first(
 /// encryption from the same server that relays the messages would mean
 /// trusting it on every page load, which is exactly what the app avoids.
 async fn landing(parts: axum::http::HeaderMap) -> axum::response::Html<String> {
-    let spanish = parts
-        .get("accept-language")
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|langs| langs.to_lowercase().starts_with("es"));
-    let page = if spanish {
-        include_str!("../web/index.es.html")
-    } else {
-        include_str!("../web/index.en.html")
+    let header = |name: &str| {
+        parts
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_lowercase()
     };
-    axum::response::Html(page.replace("{{VERSION}}", env!("CARGO_PKG_VERSION")))
+    let spanish = header("accept-language").starts_with("es");
+    // Offer the download that fits the device in hand, with the other one a
+    // line below: arriving on a phone and being handed a Windows installer is
+    // a dead end.
+    let android = header("user-agent").contains("android");
+
+    let (page, download, other) = match (spanish, android) {
+        (true, true) => (
+            include_str!("../web/index.es.html"),
+            "Descargar para Android",
+            "También disponible para Windows",
+        ),
+        (true, false) => (
+            include_str!("../web/index.es.html"),
+            "Descargar para Windows",
+            "También disponible para Android",
+        ),
+        (false, true) => (
+            include_str!("../web/index.en.html"),
+            "Download for Android",
+            "Also available for Windows",
+        ),
+        (false, false) => (
+            include_str!("../web/index.en.html"),
+            "Download for Windows",
+            "Also available for Android",
+        ),
+    };
+
+    axum::response::Html(
+        page.replace("{{VERSION}}", env!("CARGO_PKG_VERSION"))
+            .replace("{{DOWNLOAD}}", download)
+            .replace("{{OTHER}}", other),
+    )
 }
 
 /// Authenticated user, resolved from the `Authorization: Bearer <token>` header.
