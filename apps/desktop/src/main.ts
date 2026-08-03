@@ -11,6 +11,7 @@ import {
   alertUser,
   notificationsEnabled,
   playChime,
+  requestNotificationPermission,
   setNotificationsEnabled,
   setSoundEnabled,
   soundEnabled,
@@ -46,6 +47,7 @@ interface ProfileInfo {
   alias: string;
   server: string;
   status: string;
+  avatar: string | null;
 }
 
 interface ContactEntry {
@@ -54,12 +56,15 @@ interface ContactEntry {
   state: "incoming" | "outgoing" | "accepted";
   status: string;
   last_seen: number | null;
+  avatar: string | null;
 }
 
 interface Contact {
   alias: string;
   state: string;
   status: string;
+  /// Data URL they sent us, encrypted like a message; absent until they do.
+  avatar: string | null;
   lastSeen: number | null;
   messages: Message[];
   loaded: boolean;
@@ -178,6 +183,24 @@ function renderContactList() {
   }
 }
 
+/// A round portrait: the picture when there is one, the initial otherwise.
+function avatarElement(avatar: string | null | undefined, label: string): HTMLElement {
+  const wrapper = document.createElement("span");
+  wrapper.className = "avatar";
+  if (avatar) {
+    const img = document.createElement("img");
+    img.src = avatar;
+    img.alt = "";
+    wrapper.appendChild(img);
+  } else {
+    const initial = document.createElement("span");
+    initial.className = "avatar-initial";
+    initial.textContent = (label.trim()[0] ?? "?").toUpperCase();
+    wrapper.appendChild(initial);
+  }
+  return wrapper;
+}
+
 function contactItem(name: string, contact: Contact): HTMLElement {
   const li = document.createElement("li");
   li.dataset.name = name;
@@ -185,9 +208,12 @@ function contactItem(name: string, contact: Contact): HTMLElement {
   li.classList.toggle("unread", unread.has(name));
   li.classList.add(`state-${contact.state}`);
 
+  // The picture doubles as the presence indicator: the dot sits on it.
+  const portrait = avatarElement(contact.avatar, contactLabel(name));
   const dot = document.createElement("span");
   dot.className = `dot status-${contact.status}`;
   dot.title = presenceLabel(contact);
+  portrait.appendChild(dot);
 
   const names = document.createElement("div");
   names.className = "contact-names";
@@ -197,7 +223,7 @@ function contactItem(name: string, contact: Contact): HTMLElement {
   user.textContent =
     contact.state === "outgoing" ? `@${name} · ${t("contacts.pending")}` : `@${name}`;
   names.append(alias, user);
-  li.append(dot, names);
+  li.append(portrait, names);
 
   if (contact.state === "incoming") {
     const actions = document.createElement("div");
@@ -258,12 +284,14 @@ async function refreshContacts() {
         existing.alias = entry.alias;
         existing.state = entry.state;
         existing.status = entry.status;
+        existing.avatar = entry.avatar;
         existing.lastSeen = entry.last_seen;
       } else {
         contacts.set(entry.username, {
           alias: entry.alias,
           state: entry.state,
           status: entry.status,
+          avatar: entry.avatar,
           lastSeen: entry.last_seen,
           messages: [],
           loaded: false,
@@ -463,6 +491,7 @@ function addMessage(contact: string, msg: Message) {
       alias: contact,
       state: "accepted",
       status: "offline",
+      avatar: null,
       lastSeen: null,
       messages: [],
       loaded: true,
@@ -591,6 +620,7 @@ async function enterChat(profile: ProfileInfo) {
   myAlias = profile.alias || me;
   myServer = profile.server;
   myStatus = profile.status || "online";
+  myAvatar = profile.avatar ?? null;
   $("#me-alias").textContent = myAlias;
   $("#me-name").textContent = `@${me}`;
   renderMyStatus();
@@ -639,6 +669,9 @@ function hideDesktopOnly() {
 
 async function boot() {
   hideDesktopOnly();
+  // On a phone the notification permission has to be granted before the
+  // messages that need it start arriving in the background.
+  if (IS_MOBILE) void requestNotificationPermission();
   applyTheme(currentTheme());
   applyFontSize(currentFontSize());
   applyCloseToTray(closeToTray());
@@ -828,6 +861,7 @@ $("#settings-btn").addEventListener("click", () => {
   ($("#settings-lang") as HTMLSelectElement).value = lang();
   void fillAbout();
   void renderDevices();
+  renderMyAvatar();
   ($("#settings-notifications") as HTMLInputElement).checked = notificationsEnabled();
   ($("#settings-sound") as HTMLInputElement).checked = soundEnabled();
   ($("#settings-tray") as HTMLInputElement).checked = closeToTray();
@@ -859,6 +893,78 @@ async function fillAbout() {
 $("#about-website").addEventListener("click", (e) => {
   e.preventDefault();
   void openUrl(WEBSITE);
+});
+
+// ---- Foto de perfil ----
+//
+// The picture is sent to each contact inside an encrypted message, exactly
+// like anything else they receive, so the server never holds it. That also
+// means it must stay small: it travels once per contact, every time it
+// changes.
+
+const AVATAR_PIXELS = 256;
+let myAvatar: string | null = null;
+
+/// Scales the chosen image down to a square thumbnail and returns it as a
+/// data URL. A photo straight from a phone camera would be several megabytes.
+async function squareThumbnail(file: File): Promise<string> {
+  const bitmap = await createImageBitmap(file);
+  const side = Math.min(bitmap.width, bitmap.height);
+  const canvas = document.createElement("canvas");
+  canvas.width = AVATAR_PIXELS;
+  canvas.height = AVATAR_PIXELS;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("no canvas");
+  ctx.drawImage(
+    bitmap,
+    (bitmap.width - side) / 2,
+    (bitmap.height - side) / 2,
+    side,
+    side,
+    0,
+    0,
+    AVATAR_PIXELS,
+    AVATAR_PIXELS,
+  );
+  bitmap.close();
+  return canvas.toDataURL("image/jpeg", 0.85);
+}
+
+function renderMyAvatar() {
+  const holder = $("#settings-avatar");
+  holder.replaceChildren();
+  const portrait = avatarElement(myAvatar, myAlias || me);
+  holder.append(...portrait.childNodes);
+  $("#avatar-clear").classList.toggle("hidden", !myAvatar);
+}
+
+$("#avatar-pick").addEventListener("click", () => $("#avatar-file").click());
+
+$("#avatar-file").addEventListener("change", async (e) => {
+  const input = e.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = "";
+  if (!file) return;
+  try {
+    const avatar = await squareThumbnail(file);
+    await invoke("set_avatar", { avatar });
+    myAvatar = avatar;
+    renderMyAvatar();
+    toast(t("avatar.updated"));
+  } catch (err) {
+    toast(`${t("avatar.failed")}: ${tError(err)}`);
+  }
+});
+
+$("#avatar-clear").addEventListener("click", async () => {
+  try {
+    await invoke("set_avatar", { avatar: null });
+    myAvatar = null;
+    renderMyAvatar();
+    toast(t("avatar.updated"));
+  } catch (err) {
+    toast(`${t("avatar.failed")}: ${tError(err)}`);
+  }
 });
 
 // ---- Dispositivos ----
@@ -1176,6 +1282,7 @@ $("#verify-form").addEventListener("submit", async (e) => {
       alias: myAlias,
       server: ($("#server-input") as HTMLSelectElement).value,
       status: "online",
+      avatar: null,
     });
   } catch (err) {
     $("#verify-error").textContent = tError(err);

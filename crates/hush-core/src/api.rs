@@ -28,6 +28,10 @@ pub struct ContactEntry {
     /// When they were last connected, in epoch millis. Only set while they
     /// are offline.
     pub last_seen: Option<i64>,
+    /// Their profile picture, as a data URL. It never goes through the
+    /// server: contacts send it to each other encrypted, so this is filled in
+    /// from local storage rather than from the server's answer.
+    pub avatar: Option<String>,
 }
 
 /// Anything the server pushes down the stream.
@@ -431,6 +435,9 @@ impl ApiClient {
                         state: c["state"].as_str().unwrap_or("accepted").to_string(),
                         status: c["status"].as_str().unwrap_or("offline").to_string(),
                         last_seen: c["last_seen"].as_i64(),
+                        // Filled in from local storage: the server has never
+                        // seen anyone's picture.
+                        avatar: None,
                     })
                     .collect()
             })

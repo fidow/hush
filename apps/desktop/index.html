@@ -177,6 +177,16 @@
           <h2 data-i18n="settings.title"></h2>
           <button type="button" id="settings-close" class="icon-btn" data-i18n-title="settings.close">✕</button>
         </header>
+        <div class="avatar-picker">
+          <span id="settings-avatar" class="avatar avatar-large"></span>
+          <div class="avatar-actions">
+            <button type="button" id="avatar-pick" class="secondary" data-i18n="avatar.change"></button>
+            <button type="button" id="avatar-clear" class="secondary" data-i18n="avatar.remove"></button>
+            <p class="hint" data-i18n="avatar.note"></p>
+          </div>
+          <input type="file" id="avatar-file" accept="image/*" class="hidden" />
+        </div>
+
         <label>
           <span data-i18n="settings.alias"></span>
           <input id="settings-alias" maxlength="64" required />

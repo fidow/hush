@@ -17,6 +17,10 @@ class MainActivity : TauriActivity() {
     // the content by the system insets keeps the interface inside the usable
     // area, and since the keyboard is one of those insets, the composer rises
     // with it instead of hiding behind it.
+    // Without this the process is stopped soon after the app leaves the
+    // screen, and with it the connection that messages arrive on.
+    ConnectionService.start(this)
+
     val content = findViewById<View>(android.R.id.content)
     ViewCompat.setOnApplyWindowInsetsListener(content) { view, windowInsets ->
       val insets = windowInsets.getInsets(

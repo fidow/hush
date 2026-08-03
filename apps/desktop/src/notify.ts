@@ -32,6 +32,15 @@ export function setSoundEnabled(on: boolean) {
 
 let permission: boolean | null = null;
 
+/// Asks for the notification permission up front.
+///
+/// On Android 13 and later nothing is shown without it, and the messages that
+/// most need a notification arrive while the app is in the background, where
+/// there is no good moment to ask.
+export async function requestNotificationPermission(): Promise<void> {
+  await ensurePermission();
+}
+
 async function ensurePermission(): Promise<boolean> {
   if (permission !== null) return permission;
   try {

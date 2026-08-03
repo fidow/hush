@@ -1,4 +1,9 @@
 <resources>
     <string name="app_name">"Hush"</string>
     <string name="main_activity_title">"Hush"</string>
+    <!-- Shown by the notification Android requires while the app keeps its
+         connection open in the background. -->
+    <string name="connection_channel_name">"Connection"</string>
+    <string name="connection_title">"Hush"</string>
+    <string name="connection_text">"Connected, waiting for messages"</string>
 </resources>

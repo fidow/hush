@@ -189,6 +189,86 @@ async fn wait_for_text(client: &hush_core::HushClient, contact: &str, text: &str
     }
 }
 
+/// A profile picture reaches contacts without the server ever holding it: it
+/// travels inside an encrypted message like anything else.
+#[tokio::test]
+async fn a_profile_picture_reaches_contacts_encrypted() {
+    use hush_core::HushClient;
+
+    let (base, pool) = spawn_server().await;
+    let dir = std::env::temp_dir().join(format!("hush-avatar-{}", uuid::Uuid::new_v4()));
+
+    let alice = HushClient::spawn(dir.join("alice.db"));
+    alice
+        .register(&base, "alice", "Alicia", "alice@example.com", "supersecreta")
+        .await
+        .unwrap();
+    alice.verify(&pending_code(&pool, "alice").await).await.unwrap();
+    let bob = HushClient::spawn(dir.join("bob.db"));
+    bob.register(&base, "bob", "Roberto", "bob@example.com", "supersecreta")
+        .await
+        .unwrap();
+    bob.verify(&pending_code(&pool, "bob").await).await.unwrap();
+    alice.connect().await.unwrap();
+    bob.connect().await.unwrap();
+
+    alice.request_contact("bob").await.unwrap();
+    bob.accept_contact("alice").await.unwrap();
+
+    // A one pixel PNG is enough to prove it travels.
+    let picture = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==";
+    alice.set_avatar(Some(picture.to_string())).await.unwrap();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let seen = bob
+            .contacts()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.username == "alice")
+            .and_then(|c| c.avatar);
+        if seen.as_deref() == Some(picture) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the picture never reached the contact; got {seen:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // The server holds messages, not pictures: nothing readable is stored.
+    let queued: i64 = sqlx::query("SELECT COUNT(*) FROM messages WHERE body LIKE ?")
+        .bind("%iVBORw0KGgo%")
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(queued, 0, "the picture must never reach the server in the clear");
+
+    // And it must not show up as a message in the conversation.
+    assert!(bob.history("alice").await.unwrap().is_empty());
+
+    // Clearing it takes it away from them too.
+    alice.set_avatar(None).await.unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let seen = bob
+            .contacts()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.username == "alice")
+            .and_then(|c| c.avatar);
+        if seen.is_none() {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "the picture was not cleared");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 /// Two devices of the same account, both signed in at once: each is written
 /// to separately, and what one sends shows up on the other.
 #[tokio::test]

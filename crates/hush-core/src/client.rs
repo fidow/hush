@@ -90,6 +90,9 @@ pub struct ProfileInfo {
     pub server: String,
     /// Presence the user last chose on this device.
     pub status: String,
+    /// Our own profile picture as a data URL, kept locally and sent to
+    /// contacts encrypted.
+    pub avatar: Option<String>,
 }
 
 enum Command {
@@ -172,6 +175,11 @@ enum Command {
     },
     Contacts {
         reply: oneshot::Sender<Result<Vec<ContactEntry>, String>>,
+    },
+    /// Our own profile picture, handed to every accepted contact.
+    SetAvatar {
+        avatar: Option<String>,
+        reply: oneshot::Sender<Result<(), String>>,
     },
     /// The devices signed in to this account.
     Devices {
@@ -431,6 +439,12 @@ impl HushClient {
         let username = username.to_string();
         self.request(|reply| Command::BlockContact { username, reply })
             .await
+    }
+
+    /// Sets our profile picture, or clears it with `None`, and sends it to
+    /// every accepted contact.
+    pub async fn set_avatar(&self, avatar: Option<String>) -> Result<(), String> {
+        self.request(|reply| Command::SetAvatar { avatar, reply }).await
     }
 
     /// The devices signed in to this account.
@@ -734,6 +748,7 @@ impl Actor {
                 .db
                 .meta_get("status")?
                 .unwrap_or_else(|| "online".into()),
+            avatar: self.db.meta_get("avatar")?,
         })
     }
 
@@ -768,7 +783,7 @@ impl Actor {
     /// They travel as ordinary encrypted messages so the server cannot tell
     /// them apart, but they belong in no conversation.
     fn is_control(kind: &str) -> bool {
-        matches!(kind, "delete" | "rekey")
+        matches!(kind, "delete" | "rekey" | "avatar")
     }
 
     /// Rebuilds the session with `peer` after a message we could not decrypt.
@@ -950,6 +965,33 @@ impl Actor {
         }
     }
 
+    /// Sets our own profile picture and hands it to every accepted contact.
+    ///
+    /// It travels as an encrypted message like any other, so the server never
+    /// sees it. An empty picture clears it, on our side and on theirs.
+    async fn handle_set_avatar(&mut self, avatar: Option<String>) -> anyhow::Result<()> {
+        match &avatar {
+            Some(data) => self.db.meta_set("avatar", data)?,
+            None => self.db.meta_delete("avatar")?,
+        }
+        let payload = avatar.unwrap_or_default();
+
+        let contacts: Vec<String> = self
+            .db
+            .contacts()?
+            .into_iter()
+            .filter(|(_, _, state)| state == "accepted")
+            .map(|(username, _, _)| username)
+            .collect();
+        for contact in contacts {
+            if let Err(e) = self.handle_send(&contact, "avatar", &payload).await {
+                // One contact being unreachable must not stop the rest.
+                tracing::warn!("cannot send our picture to {contact}: {e}");
+            }
+        }
+        Ok(())
+    }
+
     /// Deletes a message here and, for `for_everyone`, tells the other side.
     ///
     /// The instruction travels as an ordinary encrypted message with
@@ -995,13 +1037,16 @@ impl Actor {
     /// Pulls the contact list from the server into the local cache. Failures
     /// are tolerated: the cache keeps the app usable while offline.
     async fn sync_contacts(&self) -> Option<Vec<ContactEntry>> {
-        let entries = self.session.as_ref()?.api.list_contacts().await.ok()?;
+        let mut entries = self.session.as_ref()?.api.list_contacts().await.ok()?;
         let cached: Vec<(String, String, String)> = entries
             .iter()
             .map(|c| (c.username.clone(), c.alias.clone(), c.state.clone()))
             .collect();
         if let Err(e) = self.db.replace_contacts(&cached) {
             tracing::warn!("cannot cache contacts: {e}");
+        }
+        for entry in &mut entries {
+            entry.avatar = self.db.contact_avatar(&entry.username).unwrap_or(None);
         }
         Some(entries)
     }
@@ -1016,6 +1061,7 @@ impl Actor {
             .map(|rows| {
                 rows.into_iter()
                     .map(|(username, alias, state)| ContactEntry {
+                        avatar: self.db.contact_avatar(&username).unwrap_or(None),
                         username,
                         alias,
                         state,
@@ -1088,6 +1134,20 @@ impl Actor {
                     tracing::info!("{}/{} rebuilt the session with us", msg.sender, device);
                     let sender = msg.sender.clone();
                     self.resend_undelivered(&sender).await;
+                    return None;
+                }
+
+                // Their profile picture, which reaches us the same way a
+                // message does and never passes through the server in the
+                // clear.
+                if kind == "avatar" {
+                    let avatar = (!text.is_empty()).then_some(text.as_str());
+                    if let Err(e) = self.db.set_contact_avatar(&msg.sender, avatar) {
+                        tracing::warn!("cannot store the picture of {}: {e}", msg.sender);
+                    }
+                    if let Some(events) = &self.events {
+                        let _ = events.try_send(ClientEvent::ContactsChanged);
+                    }
                     return None;
                 }
 
@@ -1191,6 +1251,7 @@ async fn report_fatal(mut commands: mpsc::Receiver<Command>, reason: String) {
             Command::BlockContact { reply, .. } => drop(reply.send(Err(reason.clone()))),
             Command::DeleteMessage { reply, .. } => drop(reply.send(Err(reason.clone()))),
             Command::Contacts { reply } => drop(reply.send(Err(reason.clone()))),
+            Command::SetAvatar { reply, .. } => drop(reply.send(Err(reason.clone()))),
             Command::Devices { reply } => drop(reply.send(Err(reason.clone()))),
             Command::RevokeDevice { reply, .. } => drop(reply.send(Err(reason.clone()))),
             Command::History { reply, .. } => drop(reply.send(Err(reason.clone()))),
@@ -1229,11 +1290,13 @@ async fn actor(db_path: PathBuf, mut commands: mpsc::Receiver<Command>) {
                 None => break,
                 Some(Command::LoadProfile { reply }) => {
                     let status = actor.db.meta_get("status").ok().flatten();
+                    let avatar = actor.db.meta_get("avatar").unwrap_or(None);
                     let result = actor.db.profile().map(|p| p.map(|p| ProfileInfo {
                         username: p.username,
                         alias: p.alias,
                         server: p.server,
                         status: status.unwrap_or_else(|| "online".into()),
+                        avatar,
                     }));
                     let _ = reply.send(result.map_err(|e| e.to_string()));
                 }
@@ -1354,6 +1417,10 @@ async fn actor(db_path: PathBuf, mut commands: mpsc::Receiver<Command>) {
                 }
                 Some(Command::Contacts { reply }) => {
                     let _ = reply.send(actor.contacts().await);
+                }
+                Some(Command::SetAvatar { avatar, reply }) => {
+                    let result = actor.handle_set_avatar(avatar).await;
+                    let _ = reply.send(result.map_err(|e| e.to_string()));
                 }
                 Some(Command::Devices { reply }) => {
                     let result = match actor.session.as_ref() {

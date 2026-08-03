@@ -76,11 +76,23 @@ so **losing it means users cannot update — only uninstall and reinstall**. It
 is deliberately outside the repository, and `.gitignore` refuses `*.jks` in
 case it is ever copied in.
 
-## What is not there yet
+## Messages while the app is in the background
 
-**Messages arrive while the app is open.** The stream is an HTTP connection the
-system suspends once the app goes to the background, so a message sent then
-shows up when the app is opened again, not as a notification. Fixing that means
-either push through Firebase — a Google project, and the server learning who to
-wake and when — or a foreground service, which shows a permanent notification.
-That is a design decision, not a missing line of code.
+Messages arrive over a connection the Rust engine holds open, and Android stops
+processes it considers idle. The app therefore runs a **foreground service**
+(`ConnectionService`), which is Android's way of saying the process is doing
+something for the user; the price it charges is a notification the user can
+see, sitting quietly in the shade. Swiping the app away stops the service, so
+the notification never outlives the user's intent.
+
+The alternative was push through Firebase, which would mean a Google project
+and telling Google who to wake and when. Message contents would still be
+encrypted, but *who is messaging whom* is exactly the metadata this project
+avoids handing anyone, so the notification is the cheaper price.
+
+The notification about an incoming message is raised from Rust rather than from
+the interface: the webview is frozen while the app is off screen, so by the
+time it could react the message would be old news.
+
+Android 13 and later also need `POST_NOTIFICATIONS` granted at runtime; the app
+asks on first start.

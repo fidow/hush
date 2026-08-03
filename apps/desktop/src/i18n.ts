@@ -126,6 +126,13 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "about.license": "Licencia",
     "about.website": "Sitio web",
 
+    "avatar.change": "Cambiar foto",
+    "avatar.remove": "Quitar",
+    "avatar.note":
+      "Tu foto se envía cifrada a cada contacto, igual que un mensaje: el servidor no la ve.",
+    "avatar.updated": "Foto actualizada",
+    "avatar.failed": "No se pudo cambiar la foto",
+
     "devices.title": "Dispositivos",
     "devices.note":
       "Sesiones abiertas en esta cuenta. Revoca cualquiera que no reconozcas: dejará de recibir mensajes al instante.",
@@ -373,6 +380,13 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "about.encryption": "Encryption",
     "about.license": "Licence",
     "about.website": "Website",
+
+    "avatar.change": "Change picture",
+    "avatar.remove": "Remove",
+    "avatar.note":
+      "Your picture is sent to each contact encrypted, like a message: the server never sees it.",
+    "avatar.updated": "Picture updated",
+    "avatar.failed": "Could not change the picture",
 
     "devices.title": "Devices",
     "devices.note":

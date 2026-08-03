@@ -99,6 +99,13 @@ available again from settings. It is deliberately separate from the login
 password, which the server does see during authentication. Losing it means
 losing the archive — there is no recovery path by design.
 
+### Profile pictures
+
+A picture never reaches the server. It is sent to each accepted contact inside
+an encrypted message, exactly like anything else they receive, and stored
+sealed on their device. That costs one message per contact whenever it changes,
+which is why it is scaled down to a 256px thumbnail before being sent.
+
 ### Several devices at once
 
 An account can hold up to four devices, each with its own identity, prekeys,

@@ -48,7 +48,15 @@ CREATE TABLE IF NOT EXISTS contacts (
     username TEXT PRIMARY KEY,
     alias    TEXT NOT NULL,
     -- Mirror of the server's list: 'incoming', 'outgoing' or 'accepted'.
-    state    TEXT NOT NULL DEFAULT 'accepted'
+    state    TEXT NOT NULL DEFAULT 'accepted',
+    -- Sealed data URL, sent to us by the contact themselves.
+    avatar   TEXT
+);
+-- Pictures survive a refresh of the cached contact list, which is replaced
+-- wholesale from the server and knows nothing about them.
+CREATE TABLE IF NOT EXISTS contact_avatars (
+    username TEXT PRIMARY KEY,
+    avatar   TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS messages (
     id         TEXT PRIMARY KEY,
@@ -188,6 +196,8 @@ impl LocalDb {
         // message, so conversations showed a line with the id of the message
         // that had just been deleted.
         let _ = conn.execute("DELETE FROM messages WHERE kind = 'delete'", []);
+        // Profile pictures, added later.
+        let _ = conn.execute("ALTER TABLE contacts ADD COLUMN avatar TEXT", []);
         // An encrypted database whose key file is gone would otherwise get a
         // brand new key and read back as garbage, so say what happened.
         let sealed: Option<String> = conn
@@ -399,6 +409,13 @@ impl LocalDb {
         })
     }
 
+    pub fn meta_delete(&self, key: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute("DELETE FROM meta WHERE key = ?1", [key])
+                .map(|_| ())
+        })
+    }
+
     pub fn meta_set(&self, key: &str, value: &str) -> Result<()> {
         let stored = if is_sealed_meta(key) {
             self.seal(value)?
@@ -479,7 +496,9 @@ impl LocalDb {
         })
     }
 
-    /// Replaces the cached list with the server's, which owns the truth.
+    /// Replaces the cached list with the server's, which owns the truth about
+    /// who your contacts are. Profile pictures are not the server's business,
+    /// so the ones already held here survive the refresh.
     pub fn replace_contacts(&self, contacts: &[(String, String, String)]) -> Result<()> {
         let sealed: Vec<(String, String, String)> = contacts
             .iter()
@@ -489,12 +508,53 @@ impl LocalDb {
             c.execute("DELETE FROM contacts", [])?;
             for (username, alias, state) in &sealed {
                 c.execute(
-                    "INSERT INTO contacts (username, alias, state) VALUES (?1, ?2, ?3)",
+                    "INSERT INTO contacts (username, alias, state, avatar)
+                     VALUES (?1, ?2, ?3, (SELECT avatar FROM contact_avatars WHERE username = ?1))",
                     params![username, alias, state],
                 )?;
             }
             Ok(())
         })
+    }
+
+    /// The picture a contact sent us, if any. It arrives encrypted like any
+    /// other message and is kept apart from the cached list so refreshing the
+    /// list from the server never loses it.
+    pub fn set_contact_avatar(&self, username: &str, avatar: Option<&str>) -> Result<()> {
+        match avatar {
+            Some(avatar) => {
+                let sealed = self.seal(avatar)?;
+                self.with(|c| {
+                    c.execute(
+                        "INSERT INTO contact_avatars (username, avatar) VALUES (?1, ?2)
+                         ON CONFLICT(username) DO UPDATE SET avatar = excluded.avatar",
+                        params![username, sealed],
+                    )?;
+                    c.execute(
+                        "UPDATE contacts SET avatar = ?2 WHERE username = ?1",
+                        params![username, sealed],
+                    )
+                    .map(|_| ())
+                })
+            }
+            None => self.with(|c| {
+                c.execute("DELETE FROM contact_avatars WHERE username = ?1", [username])?;
+                c.execute("UPDATE contacts SET avatar = NULL WHERE username = ?1", [username])
+                    .map(|_| ())
+            }),
+        }
+    }
+
+    pub fn contact_avatar(&self, username: &str) -> Result<Option<String>> {
+        let stored: Option<String> = self.with(|c| {
+            c.query_row(
+                "SELECT avatar FROM contact_avatars WHERE username = ?1",
+                [username],
+                |r| r.get(0),
+            )
+            .optional()
+        })?;
+        Ok(stored.map(|a| self.unseal(&a)))
     }
 
     /// Cached contacts as `(username, alias, state)`.

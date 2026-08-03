@@ -146,6 +146,30 @@ async fn connect(
         while let Some(event) = rx.recv().await {
             match event {
                 ClientEvent::Message(msg) => {
+                    // On Android the webview is frozen while the app is off
+                    // screen, so the notification cannot come from the
+                    // interface: by the time it runs again the message is old
+                    // news. When the app *is* on screen the interface knows
+                    // whether that conversation is open, and handles it.
+                    #[cfg(target_os = "android")]
+                    if !app
+                        .get_webview_window("main")
+                        .and_then(|w| w.is_focused().ok())
+                        .unwrap_or(false)
+                    {
+                        use tauri_plugin_notification::NotificationExt;
+                        let preview = if msg.kind == "image" {
+                            "📷".to_string()
+                        } else {
+                            msg.text.chars().take(120).collect()
+                        };
+                        let _ = app
+                            .notification()
+                            .builder()
+                            .title(&msg.sender)
+                            .body(preview)
+                            .show();
+                    }
                     let _ = app.emit(
                         "hush://message",
                         serde_json::json!({
@@ -333,6 +357,12 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+/// Sets our profile picture, or clears it, and hands it to every contact.
+#[tauri::command]
+async fn set_avatar(client: State<'_, HushClient>, avatar: Option<String>) -> Result<(), String> {
+    client.set_avatar(avatar).await
+}
+
 /// The devices signed in to this account, so the user can revoke one.
 #[tauri::command]
 async fn get_devices(client: State<'_, HushClient>) -> Result<Vec<serde_json::Value>, String> {
@@ -448,7 +478,8 @@ pub fn run() {
             idle_seconds,
             notify,
             get_devices,
-            revoke_device
+            revoke_device,
+            set_avatar
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

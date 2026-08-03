@@ -2362,7 +2362,7 @@ checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 
 [[package]]
 name = "hush-core"
-version = "1.0.5"
+version = "1.0.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2390,7 +2390,7 @@ dependencies = [
 
 [[package]]
 name = "hush-desktop"
-version = "1.0.5"
+version = "1.0.6"
 dependencies = [
  "hush-core",
  "serde",
@@ -2408,7 +2408,7 @@ dependencies = [
 
 [[package]]
 name = "hush-server"
-version = "1.0.5"
+version = "1.0.6"
 dependencies = [
  "anyhow",
  "argon2",
