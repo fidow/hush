@@ -8,6 +8,10 @@
     "opener:default",
     "notification:default",
     "updater:default",
-    "process:allow-restart"
+    "process:allow-restart",
+    "dialog:allow-save",
+    "dialog:allow-open",
+    "fs:allow-read-file",
+    "fs:allow-write-file"
   ]
 }

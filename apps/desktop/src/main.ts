@@ -4,6 +4,8 @@ import { listen } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { open, save } from "@tauri-apps/plugin-dialog";
+import { readFile, writeFile } from "@tauri-apps/plugin-fs";
 import { CATEGORIES, MAX_RECENT, RECENT_KEY } from "./emoji";
 import { applyTranslations, LANGUAGES, lang, setLang, t, tError, type Lang } from "./i18n";
 import { offerUpdate } from "./updates";
@@ -909,17 +911,11 @@ $("#settings-btn").addEventListener("click", () => {
   ($("#settings-alias") as HTMLInputElement).value = myAlias;
   ($("#settings-lang") as HTMLSelectElement).value = lang();
   void fillAbout();
-  void renderDevices();
   renderMyAvatar();
   ($("#settings-notifications") as HTMLInputElement).checked = notificationsEnabled();
   ($("#settings-sound") as HTMLInputElement).checked = soundEnabled();
   ($("#settings-tray") as HTMLInputElement).checked = closeToTray();
   $("#settings-error").textContent = "";
-  // The key is only revealed on demand, never just by opening settings.
-  $("#recovery-code").textContent = HIDDEN_KEY;
-  $("#recovery-code").classList.remove("recovery-missing");
-  $("#recovery-show").textContent = t("recovery.show");
-  recoveryShown = false;
   $("#settings").classList.remove("hidden");
 });
 
@@ -1018,76 +1014,153 @@ $("#avatar-clear").addEventListener("click", async () => {
   }
 });
 
-// ---- Dispositivos ----
+// ---- Llevarse las conversaciones a otro dispositivo ----
 
-interface DeviceEntry {
-  id: number;
-  name: string;
-  last_seen: number | null;
-  current: boolean;
-  connected: boolean;
+/// Asks for a password, twice over when it is going to protect a new file.
+///
+/// The file leaves the app and travels by whatever means the user picks, so
+/// this password is the whole of its protection; typing it wrong once while
+/// exporting would produce a file nobody can ever open.
+function askPassword(
+  title: string,
+  note: string,
+  okLabel: string,
+  action: (password: string) => Promise<void>,
+) {
+  const input = $("#password-input") as HTMLInputElement;
+  $("#password-title").textContent = title;
+  $("#password-note").textContent = note;
+  $("#password-ok").textContent = okLabel;
+  $("#password-error").textContent = "";
+  input.value = "";
+  $("#password-dialog").classList.remove("hidden");
+  input.focus();
+  passwordAction = action;
 }
 
-/// Lists the devices signed in to this account, each with a way to revoke it.
-async function renderDevices() {
-  const list = $("#device-list");
-  list.replaceChildren();
-  let devices: DeviceEntry[];
+let passwordAction: ((password: string) => Promise<void>) | null = null;
+
+function closePassword() {
+  passwordAction = null;
+  ($("#password-input") as HTMLInputElement).value = "";
+  $("#password-dialog").classList.add("hidden");
+}
+
+$("#password-close").addEventListener("click", closePassword);
+$("#password-cancel").addEventListener("click", closePassword);
+$("#password-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const action = passwordAction;
+  const password = ($("#password-input") as HTMLInputElement).value;
+  if (!action) return;
+  const ok = $("#password-ok") as HTMLButtonElement;
+  ok.disabled = true;
   try {
-    devices = await invoke<DeviceEntry[]>("get_devices");
-  } catch {
-    const li = document.createElement("li");
-    li.className = "hint";
-    li.textContent = t("devices.failed");
-    list.appendChild(li);
-    return;
+    await action(password);
+    closePassword();
+  } catch (err) {
+    // Kept open with the reason showing: a wrong password is the likely
+    // case, and reopening the dialog would lose what they typed.
+    $("#password-error").textContent = tError(err);
+  } finally {
+    ok.disabled = false;
   }
+});
 
-  for (const device of devices) {
-    const li = document.createElement("li");
-    const label = document.createElement("div");
-    const name = document.createElement("strong");
-    name.textContent = device.name || `#${device.id}`;
-    const detail = document.createElement("small");
-    detail.textContent = device.current
-      ? t("devices.thisOne")
-      : device.connected
-        ? t("devices.connected")
-        : device.last_seen
-          ? t("devices.lastSeen").replace("{when}", clockTime(device.last_seen))
-          : t("devices.never");
-    label.appendChild(name);
-    label.appendChild(detail);
-    li.appendChild(label);
-
-    // Revoking the device you are using is just signing out, so it is left to
-    // the other devices to do.
-    if (!device.current) {
-      const revoke = document.createElement("button");
-      revoke.type = "button";
-      revoke.className = "secondary";
-      revoke.textContent = t("devices.revoke");
-      revoke.addEventListener("click", () => {
-        askConfirm(
-          t("devices.revokeTitle").replace("{name}", device.name || `#${device.id}`),
-          t("devices.revokeNote"),
-          t("devices.revoke"),
-          async () => {
-            try {
-              await invoke("revoke_device", { device: device.id });
-              toast(t("devices.revoked"));
-              void renderDevices();
-            } catch (e) {
-              toast(tError(e));
-            }
-          },
-        );
+$("#export-btn").addEventListener("click", () => {
+  askPassword(
+    t("transfer.exportTitle"),
+    t("transfer.exportNote"),
+    t("transfer.export"),
+    async (password) => {
+      const bytes = await invoke<number[]>("export_conversations", { password });
+      const path = await save({
+        defaultPath: `hush-${new Date().toISOString().slice(0, 10)}.hush`,
+        filters: [{ name: "Hush", extensions: ["hush"] }],
       });
-      li.appendChild(revoke);
-    }
-    list.appendChild(li);
-  }
+      if (!path) return;
+      await writeFile(path, new Uint8Array(bytes));
+      toast(t("transfer.exported"));
+    },
+  );
+});
+
+$("#import-btn").addEventListener("click", async () => {
+  const path = await open({
+    multiple: false,
+    filters: [{ name: "Hush", extensions: ["hush"] }],
+  });
+  if (!path) return;
+  const bytes = Array.from(await readFile(path as string));
+  askPassword(
+    t("transfer.importTitle"),
+    t("transfer.importNote"),
+    t("transfer.import"),
+    async (password) => {
+      const added = await invoke<number>("import_conversations", { bytes, password });
+      // Imported messages land in the local database; drop the cached
+      // conversations so they are read again from there.
+      for (const contact of contacts.values()) {
+        contact.messages = [];
+        contact.loaded = false;
+      }
+      await refreshContacts();
+      if (current) await selectContact(current);
+      toast(
+        added > 0
+          ? t("transfer.imported").replace("{n}", String(added))
+          : t("transfer.importedNothing"),
+      );
+    },
+  );
+});
+
+// ---- La clave de un contacto ha cambiado ----
+
+/// The contact whose key is being questioned, while the dialog is up.
+let identityInQuestion: string | null = null;
+
+/// Puts the question to the user, and refuses to answer it for them.
+///
+/// A contact reinstalling and somebody stepping into the middle look exactly
+/// the same from here. The fingerprints are shown so the two of them can read
+/// them to each other over something that is not this app, which is the only
+/// way to tell those apart.
+function askAboutIdentity(contact: string, known: string, published: string) {
+  identityInQuestion = contact;
+  $("#identity-title").textContent = t("identity.title").replace(
+    "{name}",
+    contactLabel(contact),
+  );
+  $("#identity-note").textContent = t("identity.note").replace(
+    "{name}",
+    contactLabel(contact),
+  );
+  $("#identity-known").textContent = known;
+  $("#identity-published").textContent = published;
+  $("#identity-dialog").classList.remove("hidden");
 }
+
+$("#identity-close").addEventListener("click", () => {
+  identityInQuestion = null;
+  $("#identity-dialog").classList.add("hidden");
+});
+$("#identity-later").addEventListener("click", () => {
+  identityInQuestion = null;
+  $("#identity-dialog").classList.add("hidden");
+});
+$("#identity-accept").addEventListener("click", async () => {
+  const contact = identityInQuestion;
+  identityInQuestion = null;
+  $("#identity-dialog").classList.add("hidden");
+  if (!contact) return;
+  try {
+    await invoke("accept_identity", { contact });
+    toast(t("identity.accepted"));
+  } catch (e) {
+    toast(tError(e));
+  }
+});
 
 // Alert switches apply immediately; the sound one previews itself so the
 // user hears what they just turned on.
@@ -1117,71 +1190,6 @@ $("#settings-sound").addEventListener("change", (e) => {
   const on = (e.target as HTMLInputElement).checked;
   setSoundEnabled(on);
   if (on) playChime();
-});
-
-// ---- Clave de recuperación ----
-
-const HIDDEN_KEY = "••••••••••••••••";
-let recoveryShown = false;
-
-async function recoveryCode(): Promise<string> {
-  return invoke<string>("get_recovery_code");
-}
-
-$("#recovery-show").addEventListener("click", async () => {
-  const label = $("#recovery-code");
-  if (recoveryShown) {
-    label.textContent = HIDDEN_KEY;
-    $("#recovery-show").textContent = t("recovery.show");
-    recoveryShown = false;
-    return;
-  }
-  try {
-    label.textContent = await recoveryCode();
-    label.classList.remove("recovery-missing");
-    $("#recovery-show").textContent = t("recovery.hide");
-    recoveryShown = true;
-  } catch (err) {
-    // Typically `no_recovery_key`: this device has not adopted the account's
-    // key yet, which the restore box right below fixes.
-    label.textContent = tError(err);
-    label.classList.add("recovery-missing");
-  }
-});
-
-$("#recovery-copy").addEventListener("click", async () => {
-  try {
-    await navigator.clipboard.writeText(await recoveryCode());
-    toast(t("recovery.copied"));
-  } catch (err) {
-    $("#settings-error").textContent = tError(err);
-  }
-});
-
-$("#restore-btn").addEventListener("click", async () => {
-  const input = $("#restore-input") as HTMLInputElement;
-  const code = input.value.trim();
-  if (!code) return;
-  const btn = $("#restore-btn") as HTMLButtonElement;
-  btn.disabled = true;
-  $("#settings-error").textContent = "";
-  try {
-    const count = await invoke<number>("restore_history", { code });
-    input.value = "";
-    // Restored messages land in the local database; drop the cached
-    // conversations so they are re-read on next open.
-    for (const contact of contacts.values()) {
-      contact.loaded = false;
-      contact.messages = [];
-    }
-    await refreshContacts();
-    if (current) await selectContact(current);
-    toast(count > 0 ? t("restore.done").replace("{n}", String(count)) : t("restore.empty"));
-  } catch (err) {
-    $("#settings-error").textContent = tError(err);
-  } finally {
-    btn.disabled = false;
-  }
 });
 
 $("#settings-form").addEventListener("submit", async (e) => {
@@ -1431,22 +1439,13 @@ listen<{ id: string; sender: string; kind: string; text: string; created_at: num
   },
 );
 
-// Written on another device of this account: it belongs in that conversation
-// on our side, and needs no alert — we wrote it.
-listen<{ id: string; contact: string; kind: string; text: string; created_at: number }>(
-  "hush://own-message",
+// A contact is publishing a key we never agreed to. Nothing more goes to
+// them, and nothing of theirs is read, until this is answered — so it is put
+// in front of the user rather than left in a corner.
+listen<{ contact: string; known: string; published: string }>(
+  "hush://identity-changed",
   ({ payload }) => {
-    addMessage(payload.contact, {
-      id: payload.id,
-      sender: payload.contact,
-      kind: payload.kind,
-      text: payload.text,
-      created_at: payload.created_at,
-      state: "sent",
-      delivered_at: null,
-      read_at: null,
-      mine: true,
-    });
+    askAboutIdentity(payload.contact, payload.known, payload.published);
   },
 );
 

@@ -229,6 +229,12 @@ async fn main() -> anyhow::Result<()> {
                 "SMTP not configured: nobody can verify their account (set HUSH_SMTP_HOST)"
             );
         }
+        if mail::MailConfig::from_env().is_some_and(|c| c.credentials_in_the_clear()) {
+            tracing::warn!(
+                "SMTP credentials are set but the connection is not encrypted; \
+                 mail will not be sent. Set HUSH_SMTP_TLS=1 (port 465) or HUSH_SMTP_STARTTLS=1"
+            );
+        }
         if std::env::var("HUSH_LOG").is_ok_and(|v| v.contains("debug")) {
             tracing::warn!("HUSH_LOG=debug records message metadata; use info in production");
         }

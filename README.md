@@ -63,11 +63,24 @@ register a different username in each, add the other user as contact and chat.
 ### Hardening notes
 
 The server throttles registration (per IP and per destination address),
-verification and login (per account and per IP), message sending and archive
-uploads. Verification codes are additionally burned after 5 wrong attempts,
-compared in constant time, and a login for a non-existent account still runs
-Argon2 so response times don't enumerate usernames. Per-account quotas cap the
-undelivered queue and the history archive.
+verification and login (per account and per IP), message sending, profile
+lookups and key-bundle fetches. Verification codes are additionally burned
+after 5 wrong attempts, compared in constant time, and a login for a
+non-existent account still runs Argon2 so response times don't enumerate
+usernames. Per-account quotas cap the undelivered queue, by message count and
+by bytes.
+
+Anything an account publishes — its key bundle, its presence — is only served
+to people it accepted; a stranger gets the same answer as for a name that does
+not exist. Looking a profile up cannot be limited that way, since it is how you
+find somebody before adding them, so it is metered instead: a wide budget for
+lookups and a much tighter one for misses, which is what walking a dictionary
+of usernames looks like.
+
+Request bodies are capped at 256 KB except when sending a message, which may
+carry a picture; requests are bounded in number and in time, so the memory the
+server can be made to hold does not depend on how many connections somebody
+opens.
 
 For a public deployment:
 
@@ -84,20 +97,23 @@ Accounts require a username, a public alias, an email and a password
 (argon2-hashed). New accounts must be confirmed with a 6-digit code sent by
 email before they can log in or exchange messages.
 
-### History across devices
+### History stays on the device
 
-Private keys can never travel through the server, so a new device starts with
-fresh keys and no history. To avoid losing conversations, each device
-re-encrypts every message it sends or receives under the account's **recovery
-key** (Argon2id → XChaCha20-Poly1305) and uploads the result. Signing in
-elsewhere and entering that key restores the full history; the server only ever
-stores opaque blobs. Both primitives are symmetric, so this layer is
-quantum-resistant on its own.
+The server keeps no history at all: a message is deleted as soon as the
+recipient acknowledges it. What a device holds is what it received, and nothing
+of it exists anywhere else.
 
-The recovery key is generated for the account, shown once at sign-up and
-available again from settings. It is deliberately separate from the login
-password, which the server does see during authentication. Losing it means
-losing the archive — there is no recovery path by design.
+Moving conversations to another device is therefore something the user does
+deliberately, from settings: **export** writes every conversation to a file
+sealed with a password of their choosing, and **import** merges that file
+elsewhere. The password is turned into a key with Argon2id (64 MiB, 8 passes)
+and the contents sealed with XChaCha20-Poly1305; the cost is written into the
+file and authenticated along with it, so it can be raised later without making
+old exports unreadable, and cannot be edited down to something cheap to attack.
+Both primitives are symmetric, so the file is quantum-resistant on its own.
+
+A wrong password is indistinguishable from a damaged file. Losing it means
+losing the file — there is no recovery path by design.
 
 ### Profile pictures
 
@@ -106,18 +122,28 @@ an encrypted message, exactly like anything else they receive, and stored
 sealed on their device. That costs one message per contact whenever it changes,
 which is why it is scaled down to a 256px thumbnail before being sent.
 
-### Several devices at once
+### One device at a time
 
-An account can hold up to four devices, each with its own identity, prekeys,
-ratchet sessions and delivery queue — nothing private is shared between them.
-Sending encrypts the message once per device of the recipient *and* once per
-other device of the sender, so every device shows the same conversation; the
-server carries several copies of something it still cannot read. Each device
-acknowledges its own copy, and a device is revoked from settings, which drops
-its token, its queue and its keys.
+An account lives in one place. Signing in somewhere else takes it over: the
+previous session's token stops working and its open stream is dropped on the
+spot, so it stops receiving immediately rather than at its next reconnect.
 
-A client that predates this talks to the account's first device, so old and new
-clients keep working against the same server.
+That new device publishes a new identity key, which contacts will notice — see
+below, which is the point.
+
+### When a contact's key changes
+
+The client pins each contact's identity key the first time it sees one. If a
+later bundle carries a different key, nothing is sent to that contact and
+nothing of theirs is read: the app says so and shows both fingerprints, for the
+two of them to compare over some channel it does not control.
+
+This matters more than it looks. A contact reinstalling and a relay handing
+over a key of its own are indistinguishable from here, and a relay that can get
+a pinned key dropped — by, say, delivering one unreadable message — is a relay
+that can arrange to be trusted whenever it likes. So an unreadable message
+drops the ratchet and nothing else, and only the person using the app can
+accept a new key.
 
 ### Updates
 
@@ -131,7 +157,7 @@ private key lives outside the repository and signs the artefacts at build time
 ### Local storage
 
 The client database is not a place where plaintext survives either: message
-text, contact names, the identity private key, the recovery key, the session
+text, contact names, the identity private key, the session
 token and the whole libsignal store are sealed with XChaCha20-Poly1305 before
 being written. The key is generated per device, kept beside the database and
 wrapped by the operating system — DPAPI on Windows, bound to the user account —

@@ -19,19 +19,43 @@ const HOUR: i64 = 60 * MINUTE;
 const MAX_VERIFY_ATTEMPTS: i64 = 5;
 /// Caps that keep one account from filling the server's disk.
 const MAX_QUEUED_MESSAGES: i64 = 10_000;
-const MAX_ARCHIVE_ENTRIES: i64 = 200_000;
 const MAX_PREKEYS_PER_UPLOAD: usize = 200;
 const MAX_FIELD_BYTES: usize = 64 * 1024;
 const MAX_ALIAS_BYTES: usize = 64;
 /// Encrypted envelopes carrying inline images can be several MB.
 const MAX_BODY_BYTES: usize = 15 * 1024 * 1024;
-/// Devices one account may have signed in at once. Every message is encrypted
-/// once per device, so this also caps the work a single send costs.
-const MAX_DEVICES: i64 = 4;
+/// Every other request is a handful of fields. Sending a message is the one
+/// call that carries a picture, so nothing else earns the right to make the
+/// server hold megabytes before it has even decided who is asking.
+const MAX_SMALL_BODY_BYTES: usize = 256 * 1024;
+/// Requests being served at once. Bodies are buffered before routing, so
+/// without a ceiling the memory the server can be made to hold is bounded
+/// only by how many connections someone opens.
+const MAX_CONCURRENT_REQUESTS: usize = 256;
+/// How long a request may take. The event stream is excluded: it is meant to
+/// stay open, and is bounded by its own reconnection limit instead.
+const REQUEST_TIMEOUT_SECS: u64 = 60;
+/// One device at a time, and signing in somewhere else takes the account with
+/// it: the previous session's token stops working and its stream is dropped.
+/// Everything an account holds — queue, prekeys, ratchets — therefore belongs
+/// to device 1 and to nothing else.
+const THE_DEVICE: i64 = 1;
 /// Contact requests one account may send per hour, and how many of those may
 /// name someone who does not exist.
 const MAX_CONTACT_REQUESTS_PER_HOUR: usize = 20;
 const MAX_UNKNOWN_LOOKUPS_PER_HOUR: usize = 5;
+/// Profiles one account may look up per hour, and how many of those may name
+/// someone who does not exist. Looking somebody up is how you add them, so
+/// this cannot be limited to contacts — but walking a dictionary of usernames
+/// looks exactly like a long run of misses.
+const MAX_PROFILE_LOOKUPS_PER_HOUR: usize = 60;
+/// Key bundles one account may fetch per hour. Every fetch spends a one-time
+/// prekey of the account asked about, so this is what stops someone draining
+/// another account's supply and forcing weaker sessions.
+const MAX_BUNDLE_FETCHES_PER_HOUR: usize = 120;
+/// Bytes of undelivered mail one account may hold. The message count alone
+/// does not bound the disk: an envelope carrying an image is megabytes.
+const MAX_QUEUED_BYTES: i64 = 256 * 1024 * 1024;
 /// Presence a user can choose. Being reachable at all is derived from the
 /// live SSE connections, so "offline" is reported, never set.
 const SETTABLE_STATUSES: [&str; 3] = ["online", "away", "busy"];
@@ -117,17 +141,6 @@ CREATE TABLE IF NOT EXISTS messages (
     PRIMARY KEY (id, recipient_device)
 );
 CREATE INDEX IF NOT EXISTS idx_messages_recipient ON messages(recipient, created_at);
--- Client-side encrypted history. The server stores opaque blobs and can
--- never read them: they are encrypted with a key derived from the user's
--- history passphrase, which never leaves their devices.
-CREATE TABLE IF NOT EXISTS archive (
-    username   TEXT NOT NULL REFERENCES accounts(username),
-    id         TEXT NOT NULL,
-    blob       TEXT NOT NULL,
-    created_at INTEGER NOT NULL,
-    PRIMARY KEY (username, id)
-);
-CREATE INDEX IF NOT EXISTS idx_archive_user ON archive(username, created_at);
 -- Bookkeeping for read receipts. A message row disappears once the recipient
 -- acknowledges it, so this remembers who to tell when it is later read. Rows
 -- are dropped as soon as the read receipt goes out, and pruned by age
@@ -260,6 +273,18 @@ pub async fn connect_db(url: &str) -> anyhow::Result<SqlitePool> {
     .execute(&pool)
     .await?;
 
+    // The server used to keep an encrypted copy of everyone's history so a
+    // new device could restore it. It no longer stores history at all: what a
+    // device holds is what it received. The blobs were unreadable here
+    // anyway, and keeping them was one more thing to lose.
+    let _ = sqlx::query("DROP TABLE IF EXISTS archive")
+        .execute(&pool)
+        .await;
+
+    // One device per account. Anything an older client left behind on a
+    // second device is queued for a device that can no longer sign in.
+    collapse_to_one_device(&pool).await?;
+
     // Blocking added a contact state, and the original table pinned the
     // allowed values with a CHECK. SQLite cannot drop a constraint, so the
     // table is rebuilt once, keeping its rows.
@@ -290,6 +315,34 @@ pub async fn connect_db(url: &str) -> anyhow::Result<SqlitePool> {
     }
 
     Ok(pool)
+}
+
+/// Drops everything that belonged to a second, third or fourth device.
+///
+/// Accounts used to hold several at once. Now a login takes the account with
+/// it, so those rows describe devices that can never sign in again: their
+/// queued messages would never be collected and their prekeys would be handed
+/// out to contacts trying to reach a device that is gone.
+async fn collapse_to_one_device(pool: &SqlitePool) -> anyhow::Result<()> {
+    let extra: i64 = sqlx::query("SELECT COUNT(*) FROM devices WHERE id <> ?")
+        .bind(THE_DEVICE)
+        .fetch_one(pool)
+        .await?
+        .get(0);
+    if extra == 0 {
+        return Ok(());
+    }
+    tracing::info!("removing {extra} device(s): an account now holds only one");
+    let mut tx = pool.begin().await?;
+    for statement in [
+        "DELETE FROM devices WHERE id <> ?",
+        "DELETE FROM one_time_prekeys WHERE device <> ?",
+        "DELETE FROM messages WHERE recipient_device <> ?",
+    ] {
+        sqlx::query(statement).bind(THE_DEVICE).execute(&mut *tx).await?;
+    }
+    tx.commit().await?;
+    Ok(())
 }
 
 /// Adds the recipient device to the queue. The table keyed messages by id
@@ -357,17 +410,17 @@ pub fn app(db: SqlitePool) -> Router {
         .route("/v1/contacts/{peer}/block", post(block_contact))
         .route("/v1/keys", put(upload_keys))
         .route("/v1/keys/{username}", get(fetch_bundle))
-        .route("/v1/keys/{username}/devices", get(fetch_bundles))
-        .route("/v1/devices", get(list_devices))
-        .route("/v1/devices/{device}", axum::routing::delete(revoke_device))
         .route("/v1/messages/stream", get(message_stream))
-        .route("/v1/messages/{target}", put(send_message).delete(ack_message))
-        .route("/v1/messages/{id}/read", post(mark_read))
-        .route("/v1/archive", get(list_archive))
+        // Encrypted envelopes carrying inline images can be several MB. Only
+        // here: everywhere else a request that size is an attempt to make the
+        // server hold megabytes it has no use for.
         .route(
-            "/v1/archive/{id}",
-            put(put_archive).delete(delete_archive_entry),
+            "/v1/messages/{target}",
+            put(send_message)
+                .delete(ack_message)
+                .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY_BYTES)),
         )
+        .route("/v1/messages/{id}/read", post(mark_read))
         // Updates are public: a client that cannot sign in still has to be
         // able to update, and the installer is signed anyway.
         .route(
@@ -375,8 +428,7 @@ pub fn app(db: SqlitePool) -> Router {
             get(update_manifest),
         )
         .route("/v1/update/download/{file}", get(update_download))
-        // Encrypted envelopes carrying inline images can be several MB.
-        .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY_BYTES))
+        .layer(axum::extract::DefaultBodyLimit::max(MAX_SMALL_BODY_BYTES))
         // Outermost, so it runs before routing: see `read_body_first`.
         .layer(axum::middleware::from_fn(read_body_first))
         .with_state(state)
@@ -501,26 +553,80 @@ fn now() -> i64 {
 /// instead of "session expired". Buffering first costs nothing extra, since
 /// every handler that takes a body already buffers it, and the size is capped
 /// either way.
+/// Requests being served at once. Bodies are buffered here, so without a
+/// ceiling the memory the server can be made to hold is bounded only by how
+/// many connections somebody chooses to open.
+static IN_FLIGHT: std::sync::LazyLock<tokio::sync::Semaphore> =
+    std::sync::LazyLock::new(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_REQUESTS));
+
 async fn read_body_first(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
+    use std::time::Duration;
+
+    // The event stream is meant to stay open for hours. It carries no body,
+    // so there is nothing to buffer, and holding a permit or a deadline over
+    // it would close every stream the server has; what bounds it is its own
+    // reconnection limit.
+    let path = req.uri().path();
+    if path == "/v1/messages/stream" {
+        return next.run(req).await;
+    }
+
+    // Running before routing is the whole point, so the route's own limit is
+    // not available yet: the path is. Only sending a message carries a
+    // picture; letting every other call reserve fifteen megabytes before
+    // anyone has been authenticated is free memory for whoever asks.
+    let limit = if path.starts_with("/v1/messages/") {
+        MAX_BODY_BYTES
+    } else {
+        MAX_SMALL_BODY_BYTES
+    };
+
+    let Ok(_permit) = IN_FLIGHT.try_acquire() else {
+        tracing::warn!("at capacity; a request was refused");
+        return err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "server_busy",
+            "The server is busy, try again shortly",
+        )
+        .into_response();
+    };
+
+    let timeout = Duration::from_secs(REQUEST_TIMEOUT_SECS);
+    let too_slow = || {
+        err(
+            StatusCode::REQUEST_TIMEOUT,
+            "request_timeout",
+            "The request took too long",
+        )
+        .into_response()
+    };
 
     let (parts, body) = req.into_parts();
-    match axum::body::to_bytes(body, MAX_BODY_BYTES).await {
-        Ok(bytes) => {
-            let req = axum::extract::Request::from_parts(parts, axum::body::Body::from(bytes));
-            next.run(req).await
-        }
+    // A client that opens a request and then dribbles the body would
+    // otherwise hold a permit for as long as it liked.
+    let bytes = match tokio::time::timeout(timeout, axum::body::to_bytes(body, limit)).await {
+        Ok(Ok(bytes)) => bytes,
         // Over the cap: nothing to do but refuse. This is the one case where
         // the body still goes unread, exactly as any server behaves.
-        Err(_) => err(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "payload_too_large",
-            "Request body too large",
-        )
-        .into_response(),
+        Ok(Err(_)) => {
+            return err(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "payload_too_large",
+                "Request body too large",
+            )
+            .into_response()
+        }
+        Err(_) => return too_slow(),
+    };
+
+    let req = axum::extract::Request::from_parts(parts, axum::body::Body::from(bytes));
+    match tokio::time::timeout(timeout, next.run(req)).await {
+        Ok(response) => response,
+        Err(_) => too_slow(),
     }
 }
 
@@ -890,13 +996,7 @@ async fn verify_account(
 struct LoginRequest {
     username: String,
     password: String,
-    /// The device signing in again, keeping its queue and its sessions.
-    device_id: Option<i64>,
-    /// Set by a client with no device of its own yet, so the account gains
-    /// one instead of taking over the first.
-    #[serde(default)]
-    new_device: bool,
-    /// Shown when reviewing or revoking devices.
+    /// Recorded so the log can say what took the account over.
     #[serde(default)]
     device_name: String,
 }
@@ -966,30 +1066,10 @@ async fn login(
     }
     state.limits.reset(&format!("login:{username}"));
 
-    // Which device is this? A client that knows its own keeps it, one that
-    // says it is new gets a fresh id, and anything else — a client from
-    // before devices existed — is the account's first.
-    let device = match (req.device_id, req.new_device) {
-        (Some(id), _) => {
-            let known = sqlx::query("SELECT 1 FROM devices WHERE username = ? AND id = ?")
-                .bind(&username)
-                .bind(id)
-                .fetch_optional(&state.db)
-                .await
-                .map_err(internal)?;
-            // Revoked while it was away: it comes back as a new device.
-            if known.is_some() {
-                id
-            } else {
-                next_device_id(&state.db, &username).await?
-            }
-        }
-        (None, true) => next_device_id(&state.db, &username).await?,
-        (None, false) => 1,
-    };
-
-    // A new token every time, so a password change or a device swap does not
-    // leave an old one working.
+    // An account is one device. Signing in here is therefore signing the
+    // previous place out: a new token, which stops the old one working, and
+    // the ratchets it held are gone, so it publishes its keys again below.
+    let device = THE_DEVICE;
     let token = new_token();
     sqlx::query(
         "INSERT INTO devices (username, id, name, token, registration_id, identity_key, created_at)
@@ -1006,44 +1086,35 @@ async fn login(
     .execute(&state.db)
     .await
     .map_err(internal)?;
-    // Clients that predate devices read the account's token.
-    if device == 1 {
-        sqlx::query("UPDATE accounts SET token = ? WHERE username = ?")
-            .bind(&token)
-            .bind(&username)
-            .execute(&state.db)
-            .await
-            .map_err(internal)?;
+    sqlx::query("UPDATE accounts SET token = ? WHERE username = ?")
+        .bind(&token)
+        .bind(&username)
+        .execute(&state.db)
+        .await
+        .map_err(internal)?;
+
+    // The old token is dead, but a stream opened with it is already
+    // authenticated and would keep receiving. Drop it here so the previous
+    // device stops hearing anything the moment this one arrives, rather than
+    // whenever it next reconnects.
+    let evicted = state
+        .live
+        .lock()
+        .await
+        .remove(&(username.clone(), device))
+        .is_some();
+    if evicted {
+        tracing::info!(user = %username, %ip, "the previous device was signed out");
     }
 
-    tracing::info!(user = %username, %ip, device, "login succeeded");
+    tracing::info!(user = %username, %ip, "login succeeded");
     Ok(Json(serde_json::json!({ "token": token, "device_id": device })))
 }
 
 /// The lowest free device number for an account. Signal addresses a device
 /// with a single byte, so numbers are reused once a device is revoked rather
 /// than counting upwards forever.
-async fn next_device_id(db: &SqlitePool, username: &str) -> Result<i64, ApiError> {
-    let taken: Vec<i64> = sqlx::query("SELECT id FROM devices WHERE username = ? ORDER BY id")
-        .bind(username)
-        .fetch_all(db)
-        .await
-        .map_err(internal)?
-        .iter()
-        .map(|r| r.get(0))
-        .collect();
-    (1..=MAX_DEVICES)
-        .find(|id| !taken.contains(id))
-        .ok_or_else(|| {
-            err(
-                StatusCode::CONFLICT,
-                "too_many_devices",
-                "This account has too many devices; revoke one first",
-            )
-        })
-}
-
-/// Records that a device was seen, for the device list.
+/// Records that the account's device was seen.
 async fn touch_device(db: &SqlitePool, username: &str, device: i64) {
     let _ = sqlx::query("UPDATE devices SET last_seen = ? WHERE username = ? AND id = ?")
         .bind(now())
@@ -1051,64 +1122,6 @@ async fn touch_device(db: &SqlitePool, username: &str, device: i64) {
         .bind(device)
         .execute(db)
         .await;
-}
-
-/// The account's devices, so the user can see what is signed in and revoke
-/// anything they do not recognise.
-async fn list_devices(
-    auth: AuthUser,
-    State(state): State<AppState>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let rows = sqlx::query(
-        "SELECT id, name, last_seen, created_at FROM devices WHERE username = ? ORDER BY id",
-    )
-    .bind(&auth.username)
-    .fetch_all(&state.db)
-    .await
-    .map_err(internal)?;
-    let online = state.live.lock().await;
-    let devices: Vec<serde_json::Value> = rows
-        .iter()
-        .map(|r| {
-            let id: i64 = r.get(0);
-            serde_json::json!({
-                "id": id,
-                "name": r.get::<String, _>(1),
-                "last_seen": r.get::<Option<i64>, _>(2),
-                "created_at": r.get::<i64, _>(3),
-                "current": id == auth.device,
-                "connected": online.contains_key(&(auth.username.clone(), id)),
-            })
-        })
-        .collect();
-    Ok(Json(serde_json::json!({ "devices": devices })))
-}
-
-/// Revokes a device: its token stops working, its queue goes, and its prekeys
-/// with it. Contacts renegotiate with whatever devices remain.
-async fn revoke_device(
-    auth: AuthUser,
-    State(state): State<AppState>,
-    Path(device): Path<i64>,
-) -> Result<StatusCode, ApiError> {
-    let mut tx = state.db.begin().await.map_err(internal)?;
-    for statement in [
-        "DELETE FROM devices WHERE username = ? AND id = ?",
-        "DELETE FROM one_time_prekeys WHERE username = ? AND device = ?",
-        "DELETE FROM messages WHERE recipient = ? AND recipient_device = ?",
-    ] {
-        sqlx::query(statement)
-            .bind(&auth.username)
-            .bind(device)
-            .execute(&mut *tx)
-            .await
-            .map_err(internal)?;
-    }
-    tx.commit().await.map_err(internal)?;
-    // Drop its stream so the revoked device stops receiving immediately.
-    state.live.lock().await.remove(&(auth.username.clone(), device));
-    tracing::info!(user = %auth.username, ip = %auth.ip, device, "device revoked");
-    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Deserialize)]
@@ -1273,20 +1286,50 @@ async fn reset_password(
     Ok(Json(serde_json::json!({ "status": "reset" })))
 }
 
+/// Alias and identity key of a user. Looking somebody up is how you find them
+/// before adding them, so this cannot be limited to contacts — but it is the
+/// one call that answers "does this name exist", so it is metered the same way
+/// contact requests are: a wide budget for lookups, a much tighter one for
+/// misses, which is what walking a dictionary looks like.
 async fn get_profile(
-    _auth: AuthUser,
+    auth: AuthUser,
     State(state): State<AppState>,
     Path(username): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let username = username.to_lowercase();
+    let now_ms = now();
+    if !state.limits.allow(
+        &format!("profile:{}", auth.username),
+        MAX_PROFILE_LOOKUPS_PER_HOUR,
+        HOUR,
+        now_ms,
+    ) {
+        tracing::warn!(user = %auth.username, ip = %auth.ip, "profile lookups throttled");
+        return Err(too_many());
+    }
+
     let row = sqlx::query(
         "SELECT alias, identity_key, status FROM accounts WHERE username = ? AND verified = 1",
     )
     .bind(&username)
     .fetch_optional(&state.db)
     .await
-    .map_err(internal)?
-    .ok_or_else(not_found)?;
+    .map_err(internal)?;
+    let Some(row) = row else {
+        // Out of misses: stop answering at all, so the run of guesses that
+        // would map out who exists ends here rather than continuing at the
+        // wider budget above.
+        if !state.limits.allow(
+            &format!("profile-miss:{}", auth.username),
+            MAX_UNKNOWN_LOOKUPS_PER_HOUR,
+            HOUR,
+            now_ms,
+        ) {
+            tracing::warn!(user = %auth.username, ip = %auth.ip, "possible username enumeration, throttled");
+            return Err(too_many());
+        }
+        return Err(not_found());
+    };
     let connected = is_connected(&state.live, &username).await;
     Ok(Json(serde_json::json!({
         "username": username,
@@ -1393,6 +1436,24 @@ async fn link_state(db: &SqlitePool, owner: &str, peer: &str) -> Result<Option<S
             .map_err(internal)?
             .map(|r| r.get::<String, _>(0)),
     )
+}
+
+/// Refuses unless `caller` is someone `subject` accepted, or is `subject`
+/// themselves. What another account publishes — its keys, its presence — is
+/// for the people it agreed to talk to; a stranger gets the same answer as for
+/// a name that does not exist, so this reveals nothing either.
+async fn require_accepted(
+    db: &SqlitePool,
+    subject: &str,
+    caller: &str,
+) -> Result<(), ApiError> {
+    if subject == caller {
+        return Ok(());
+    }
+    match link_state(db, subject, caller).await?.as_deref() {
+        Some("accepted") => Ok(()),
+        _ => Err(not_found()),
+    }
 }
 
 async fn set_link(
@@ -1616,9 +1677,17 @@ async fn remove_contact(
     Path(peer): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let peer = peer.to_lowercase();
-    sqlx::query("DELETE FROM contacts WHERE (owner = ? AND peer = ?) OR (owner = ? AND peer = ?)")
+    // Our own side always goes. Theirs goes too, so removing a contact is
+    // mutual rather than leaving them talking to someone who left — but never
+    // when their side is a block: that row is their decision about us, and
+    // deleting it here would let anyone lift a block simply by asking.
+    sqlx::query("DELETE FROM contacts WHERE owner = ? AND peer = ?")
         .bind(&auth.username)
         .bind(&peer)
+        .execute(&state.db)
+        .await
+        .map_err(internal)?;
+    sqlx::query("DELETE FROM contacts WHERE owner = ? AND peer = ? AND state <> 'blocked'")
         .bind(&peer)
         .bind(&auth.username)
         .execute(&state.db)
@@ -1636,14 +1705,30 @@ struct PresenceRequest {
 
 /// Presence for a set of users: their chosen status while connected, or
 /// "offline" when they hold no live stream.
+///
+/// Only for people who accepted the caller. Whether someone is at their
+/// computer, and when, is exactly the kind of thing this project exists not to
+/// hand out — least of all to a stranger who merely knows their name. Anyone
+/// else reads as offline, which is also what a name that does not exist reads
+/// as, so the answer reveals nothing either way.
 async fn query_presence(
-    _auth: AuthUser,
+    auth: AuthUser,
     State(state): State<AppState>,
     Json(req): Json<PresenceRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     if req.usernames.len() > 500 {
         return Err(bad_request("invalid_request", "Too many usernames"));
     }
+    let visible: std::collections::HashSet<String> =
+        sqlx::query("SELECT owner FROM contacts WHERE peer = ? AND state = 'accepted'")
+            .bind(&auth.username)
+            .fetch_all(&state.db)
+            .await
+            .map_err(internal)?
+            .iter()
+            .map(|r| r.get::<String, _>(0))
+            .collect();
+
     let online: std::collections::HashSet<String> = state
         .live
         .lock()
@@ -1654,7 +1739,9 @@ async fn query_presence(
     let mut out = serde_json::Map::new();
     for username in &req.usernames {
         let username = username.to_lowercase();
-        let status = if online.contains(&username) {
+        let status = if online.contains(&username)
+            && (username == auth.username || visible.contains(&username))
+        {
             sqlx::query("SELECT status FROM accounts WHERE username = ?")
                 .bind(&username)
                 .fetch_optional(&state.db)
@@ -1819,14 +1906,30 @@ async fn bundle_for(
     }))
 }
 
-/// The bundle of the account's first device, for clients that predate
-/// multiple devices and hold a single session per contact.
+/// Everything needed to start writing to an account.
+///
+/// Only for people it accepted, and metered on top of that. Every call spends
+/// one of the account's one-time prekeys — they exist to be used once — so an
+/// endpoint open to anyone is an endpoint that lets anyone exhaust them and
+/// push every new conversation onto the reusable key instead, which is
+/// strictly weaker.
 async fn fetch_bundle(
-    _auth: AuthUser,
+    auth: AuthUser,
     State(state): State<AppState>,
     Path(username): Path<String>,
 ) -> Result<Json<BundleResponse>, ApiError> {
     let username = username.to_lowercase();
+    if !state.limits.allow(
+        &format!("bundle:{}", auth.username),
+        MAX_BUNDLE_FETCHES_PER_HOUR,
+        HOUR,
+        now(),
+    ) {
+        tracing::warn!(user = %auth.username, ip = %auth.ip, "key bundle fetches throttled");
+        return Err(too_many());
+    }
+    require_accepted(&state.db, &username, &auth.username).await?;
+
     let device = primary_device(&state.db, &username).await?;
     let row = sqlx::query(
         "SELECT registration_id, identity_key, bundle_static FROM devices
@@ -1858,68 +1961,10 @@ async fn fetch_bundle(
     })
 }
 
-/// Bundles for every device of an account: a message is encrypted separately
-/// for each one.
-async fn fetch_bundles(
-    _auth: AuthUser,
-    State(state): State<AppState>,
-    Path(username): Path<String>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let username = username.to_lowercase();
-    let rows = sqlx::query(
-        "SELECT id, registration_id, identity_key, bundle_static FROM devices
-         WHERE username = ? ORDER BY id",
-    )
-    .bind(&username)
-    .fetch_all(&state.db)
-    .await
-    .map_err(internal)?;
-    if rows.is_empty() {
-        return Err(not_found());
-    }
-
-    let mut devices = Vec::new();
-    for row in rows {
-        if let Some(bundle) = bundle_for(
-            &state.db,
-            &username,
-            row.get(0),
-            row.get(1),
-            row.get(2),
-            row.get(3),
-        )
-        .await?
-        {
-            devices.push(serde_json::to_value(bundle).map_err(internal)?);
-        }
-    }
-    if devices.is_empty() {
-        return Err(err(
-            StatusCode::NOT_FOUND,
-            "no_keys",
-            "That user cannot receive messages yet",
-        ));
-    }
-    Ok(Json(serde_json::json!({ "devices": devices })))
-}
-
-#[derive(Deserialize)]
-struct Envelope {
-    device: i64,
-    body: String,
-}
-
 #[derive(Deserialize)]
 struct SendMessageRequest {
-    /// Opaque encrypted payload, for clients that predate multiple devices.
-    /// It goes to the account's first device, the one they hold a session
-    /// with.
-    body: Option<String>,
-    /// One payload per recipient device: the message is encrypted separately
-    /// for each, so the server carries several copies of something it still
-    /// cannot read.
-    #[serde(default)]
-    envelopes: Vec<Envelope>,
+    /// Opaque encrypted payload. One recipient, one device, one copy.
+    body: String,
 }
 
 #[derive(Serialize)]
@@ -1952,11 +1997,7 @@ async fn send_message(
     }
     // Messaging is contacts-only: an accepted link is what a contact request
     // buys you, and it also keeps strangers from filling anyone's mailbox.
-    // Sending to yourself is how your own other devices keep up.
-    let to_self = recipient == auth.username;
-    if !to_self
-        && link_state(&state.db, &recipient, &auth.username).await?.as_deref() != Some("accepted")
-    {
+    if link_state(&state.db, &recipient, &auth.username).await?.as_deref() != Some("accepted") {
         return Err(err(
             StatusCode::FORBIDDEN,
             "not_a_contact",
@@ -1965,15 +2006,17 @@ async fn send_message(
     }
 
     // Cap the undelivered queue so one sender cannot fill the disk (or a
-    // recipient's memory on reconnect) by flooding an offline account.
-    let queued: i64 = sqlx::query("SELECT COUNT(*) FROM messages WHERE recipient = ?")
+    // recipient's memory on reconnect) by flooding an offline account. Both
+    // counts matter: ten thousand envelopes carrying pictures are gigabytes,
+    // and a few of those would pass a check that only counted rows.
+    let queued = sqlx::query("SELECT COUNT(*), COALESCE(SUM(LENGTH(body)), 0) FROM messages WHERE recipient = ?")
         .bind(&recipient)
         .fetch_one(&state.db)
         .await
-        .map_err(internal)?
-        .get(0);
-    if queued >= MAX_QUEUED_MESSAGES {
-        tracing::warn!(to = %recipient, "mailbox full, delivery refused");
+        .map_err(internal)?;
+    let (count, bytes): (i64, i64) = (queued.get(0), queued.get(1));
+    if count >= MAX_QUEUED_MESSAGES || bytes + req.body.len() as i64 > MAX_QUEUED_BYTES {
+        tracing::warn!(to = %recipient, count, bytes, "mailbox full, delivery refused");
         return Err(err(
             StatusCode::INSUFFICIENT_STORAGE,
             "mailbox_full",
@@ -1981,64 +2024,41 @@ async fn send_message(
         ));
     }
 
-    // One id for the whole fan-out: the sender tracks a single message, and
-    // each copy is acknowledged by the device that received it.
     let id = uuid::Uuid::new_v4().to_string();
-    let copies: Vec<(i64, String)> = match req.body {
-        // A client that knows nothing about devices holds a session with the
-        // account's first one.
-        Some(body) => vec![(primary_device(&state.db, &recipient).await?, body)],
-        None => req.envelopes.into_iter().map(|e| (e.device, e.body)).collect(),
+    let device = primary_device(&state.db, &recipient).await?;
+    sqlx::query(
+        "INSERT INTO messages
+             (id, recipient_device, sender, sender_device, recipient, body, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(device)
+    .bind(&auth.username)
+    .bind(auth.device)
+    .bind(&recipient)
+    .bind(&req.body)
+    .bind(now_ms)
+    .execute(&state.db)
+    .await
+    .map_err(internal)?;
+
+    // Best-effort live push; the SSE backlog query covers anyone offline.
+    let msg = OutMessage {
+        id: id.clone(),
+        sender: auth.username.clone(),
+        sender_device: auth.device,
+        body: req.body,
+        created_at: now_ms,
     };
-    if copies.is_empty() {
-        return Err(bad_request("invalid_request", "No message body"));
+    if let Some(listener) = state.live.lock().await.get(&(recipient.clone(), device)) {
+        let _ = listener.tx.try_send(Push::Message(msg));
     }
-
-    for (device, body) in &copies {
-        // A copy for a device that is gone would sit in the queue forever.
-        if to_self && *device == auth.device {
-            continue;
-        }
-        sqlx::query(
-            "INSERT INTO messages
-                 (id, recipient_device, sender, sender_device, recipient, body, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&id)
-        .bind(device)
-        .bind(&auth.username)
-        .bind(auth.device)
-        .bind(&recipient)
-        .bind(body)
-        .bind(now_ms)
-        .execute(&state.db)
-        .await
-        .map_err(internal)?;
-
-        // Best-effort live push; the SSE backlog query covers anyone offline.
-        let msg = OutMessage {
-            id: id.clone(),
-            sender: auth.username.clone(),
-            sender_device: auth.device,
-            body: body.clone(),
-            created_at: now_ms,
-        };
-        if let Some(listener) = state.live.lock().await.get(&(recipient.clone(), *device)) {
-            let _ = listener.tx.try_send(Push::Message(msg));
-        }
-    }
-    tracing::debug!(
-        from = %auth.username, ip = %auth.ip,
-        to = %recipient,
-        devices = copies.len(),
-        %id,
-        "message queued"
-    );
+    tracing::debug!(from = %auth.username, ip = %auth.ip, to = %recipient, %id, "message queued");
     Ok(Json(SendMessageResponse { id }))
 }
 
-/// The account's first device: where a client that predates multiple devices
-/// sends, and whose bundle it fetches.
+/// The account's device. Still looked up rather than assumed: the row is what
+/// says the account has one at all.
 async fn primary_device(db: &SqlitePool, username: &str) -> Result<i64, ApiError> {
     sqlx::query("SELECT MIN(id) FROM devices WHERE username = ?")
         .bind(username)
@@ -2215,106 +2235,6 @@ async fn mark_read(
     .await;
     tracing::debug!(user = %auth.username, ip = %auth.ip, id = %id, "message read");
     Ok(StatusCode::NO_CONTENT)
-}
-
-#[derive(Deserialize)]
-struct ArchiveEntryRequest {
-    /// Opaque client-encrypted history entry.
-    blob: String,
-}
-
-/// Stores one encrypted history entry. Overwrites on repeat so a client can
-/// safely retry uploads.
-async fn put_archive(
-    auth: AuthUser,
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Json(req): Json<ArchiveEntryRequest>,
-) -> Result<StatusCode, ApiError> {
-    if id.len() > 128 {
-        return Err(bad_request("invalid_id", "Invalid identifier"));
-    }
-    if !state
-        .limits
-        .allow(&format!("archive:{}", auth.username), 600, MINUTE, now())
-    {
-        return Err(too_many());
-    }
-    // Overwrites of an existing entry are always allowed; only growth counts
-    // against the quota.
-    let existing = sqlx::query("SELECT 1 FROM archive WHERE username = ? AND id = ?")
-        .bind(&auth.username)
-        .bind(&id)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(internal)?;
-    if existing.is_none() {
-        let count: i64 = sqlx::query("SELECT COUNT(*) FROM archive WHERE username = ?")
-            .bind(&auth.username)
-            .fetch_one(&state.db)
-            .await
-            .map_err(internal)?
-            .get(0);
-        if count >= MAX_ARCHIVE_ENTRIES {
-            return Err(err(
-                StatusCode::INSUFFICIENT_STORAGE,
-                "archive_full",
-                "Your history archive is full",
-            ));
-        }
-    }
-
-    sqlx::query(
-        "INSERT INTO archive (username, id, blob, created_at) VALUES (?, ?, ?, ?)
-         ON CONFLICT(username, id) DO UPDATE SET blob = excluded.blob",
-    )
-    .bind(&auth.username)
-    .bind(&id)
-    .bind(&req.blob)
-    .bind(now())
-    .execute(&state.db)
-    .await
-    .map_err(internal)?;
-    tracing::debug!(user = %auth.username, ip = %auth.ip, id = %id, "history entry archived");
-    Ok(StatusCode::NO_CONTENT)
-}
-
-/// Drops one entry from the account's history archive, so a deleted message
-/// does not come back the next time the history is restored.
-async fn delete_archive_entry(
-    auth: AuthUser,
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<StatusCode, ApiError> {
-    if id.len() > 128 {
-        return Err(bad_request("invalid_id", "Invalid identifier"));
-    }
-    sqlx::query("DELETE FROM archive WHERE username = ? AND id = ?")
-        .bind(&auth.username)
-        .bind(&id)
-        .execute(&state.db)
-        .await
-        .map_err(internal)?;
-    tracing::debug!(user = %auth.username, ip = %auth.ip, id = %id, "history entry deleted");
-    Ok(StatusCode::NO_CONTENT)
-}
-
-/// Returns the whole encrypted history archive for the account.
-async fn list_archive(
-    auth: AuthUser,
-    State(state): State<AppState>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let rows = sqlx::query("SELECT id, blob FROM archive WHERE username = ? ORDER BY created_at")
-        .bind(&auth.username)
-        .fetch_all(&state.db)
-        .await
-        .map_err(internal)?;
-    tracing::debug!(user = %auth.username, ip = %auth.ip, entries = rows.len(), "encrypted history downloaded");
-    let entries: Vec<serde_json::Value> = rows
-        .iter()
-        .map(|r| serde_json::json!({ "id": r.get::<String, _>(0), "blob": r.get::<String, _>(1) }))
-        .collect();
-    Ok(Json(serde_json::json!({ "entries": entries })))
 }
 
 #[derive(Deserialize)]
@@ -2562,14 +2482,25 @@ async fn update_download(Path(file): Path<String>) -> Result<axum::response::Res
         return Err(not_found());
     }
 
-    let bytes = std::fs::read(dir.join(&file)).map_err(|_| not_found())?;
+    // Streamed rather than read into memory: the installer is megabytes, this
+    // endpoint needs no credentials, and a handful of parallel downloads
+    // reading the whole file at once is an easy way to make the server run
+    // out of room.
+    let path = dir.join(&file);
+    let handle = tokio::fs::File::open(&path).await.map_err(|_| not_found())?;
+    let length = handle.metadata().await.map(|m| m.len()).map_err(internal)?;
+    let body = axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(handle));
+
     tracing::debug!(%file, "serving an update download");
     Ok((
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "application/octet-stream",
-        )],
-        bytes,
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "application/octet-stream".to_string(),
+            ),
+            (axum::http::header::CONTENT_LENGTH, length.to_string()),
+        ],
+        body,
     )
         .into_response())
 }

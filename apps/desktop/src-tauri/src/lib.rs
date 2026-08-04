@@ -151,17 +151,34 @@ fn idle_seconds() -> Option<u64> {
     }
 }
 
-/// The recovery key of this device, for the user to copy and keep.
+/// Packs every conversation into an encrypted file, readable only with
+/// `password`. The bytes go back to the interface, which is what knows how to
+/// put a file where the user asked — including on Android, where "a file" is
+/// whatever the system's picker hands back.
 #[tauri::command]
-async fn get_recovery_code(client: State<'_, HushClient>) -> Result<String, String> {
-    client.recovery_code().await
+async fn export_conversations(
+    client: State<'_, HushClient>,
+    password: String,
+) -> Result<Vec<u8>, String> {
+    client.export_conversations(&password).await
 }
 
-/// Adopts a recovery key and pulls down the archived history. Returns how
-/// many messages were restored.
+/// Merges an exported file into this device. Returns how many messages were
+/// new.
 #[tauri::command]
-async fn restore_history(client: State<'_, HushClient>, code: String) -> Result<usize, String> {
-    client.restore_history(&code).await
+async fn import_conversations(
+    client: State<'_, HushClient>,
+    bytes: Vec<u8>,
+    password: String,
+) -> Result<usize, String> {
+    client.import_conversations(bytes, &password).await
+}
+
+/// Accepts a contact's new identity key, after the user has been shown that
+/// it changed and confirmed it was really them.
+#[tauri::command]
+async fn accept_identity(client: State<'_, HushClient>, contact: String) -> Result<(), String> {
+    client.accept_identity(&contact).await
 }
 
 /// Opens the message stream; incoming messages arrive as `hush://message`
@@ -232,17 +249,20 @@ async fn connect(
                 ClientEvent::MessageDeleted { id } => {
                     let _ = app.emit("hush://deleted", serde_json::json!({ "id": id }));
                 }
-                // Written on another device of this account: same shape as an
-                // incoming message, but ours.
-                ClientEvent::OwnMessage(msg) => {
+                // A contact is publishing a key we never agreed to. Nothing
+                // more is sent to them until the user decides whether that
+                // was really them, so this has to reach the interface.
+                ClientEvent::IdentityChanged {
+                    contact,
+                    known,
+                    published,
+                } => {
                     let _ = app.emit(
-                        "hush://own-message",
+                        "hush://identity-changed",
                         serde_json::json!({
-                            "id": msg.id,
-                            "contact": msg.sender,
-                            "kind": msg.kind,
-                            "text": msg.text,
-                            "created_at": msg.created_at,
+                            "contact": contact,
+                            "known": known,
+                            "published": published,
                         }),
                     );
                 }
@@ -420,18 +440,6 @@ async fn set_avatar(client: State<'_, HushClient>, avatar: Option<String>) -> Re
     client.set_avatar(avatar).await
 }
 
-/// The devices signed in to this account, so the user can revoke one.
-#[tauri::command]
-async fn get_devices(client: State<'_, HushClient>) -> Result<Vec<serde_json::Value>, String> {
-    client.devices().await
-}
-
-/// Signs a device out for good.
-#[tauri::command]
-async fn revoke_device(client: State<'_, HushClient>, device: i64) -> Result<(), String> {
-    client.revoke_device(device).await
-}
-
 /// Shows a desktop notification under Hush's own identity.
 ///
 /// The notification plugin only registers that identity for an installed
@@ -503,6 +511,8 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_fs::init())
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
             #[cfg(windows)]
@@ -577,14 +587,13 @@ pub fn run() {
             get_history,
             mark_read,
             update_me,
-            get_recovery_code,
-            restore_history,
+            export_conversations,
+            import_conversations,
+            accept_identity,
             forgot_password,
             reset_password,
             idle_seconds,
             notify,
-            get_devices,
-            revoke_device,
             set_avatar,
             set_alert_mode,
             delete_conversation

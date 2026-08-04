@@ -6,6 +6,12 @@
 //! - `HUSH_SMTP_FROM`     sender address, e.g. `hush@example.com`
 //! - `HUSH_SMTP_USER` / `HUSH_SMTP_PASS`  optional credentials
 //! - `HUSH_SMTP_STARTTLS` set to `1` to use STARTTLS
+//! - `HUSH_SMTP_TLS`      set to `1` for TLS from the first byte (port 465)
+//!
+//! Credentials are only ever sent over an encrypted connection: with neither
+//! `HUSH_SMTP_TLS` nor `HUSH_SMTP_STARTTLS` set, a configured user and
+//! password would cross the network in the clear, so the send is refused
+//! instead.
 
 use lettre::message::header::ContentType;
 use lettre::transport::smtp::authentication::Credentials;
@@ -19,6 +25,8 @@ pub struct MailConfig {
     user: Option<String>,
     pass: Option<String>,
     starttls: bool,
+    /// TLS from the first byte, as port 465 expects.
+    tls: bool,
 }
 
 /// Whether email delivery is unconfigured (verification codes cannot be sent).
@@ -48,7 +56,14 @@ impl MailConfig {
             user: std::env::var("HUSH_SMTP_USER").ok(),
             pass: std::env::var("HUSH_SMTP_PASS").ok(),
             starttls: std::env::var("HUSH_SMTP_STARTTLS").is_ok_and(|v| v == "1"),
+            tls: std::env::var("HUSH_SMTP_TLS").is_ok_and(|v| v == "1"),
         })
+    }
+
+    /// Whether credentials are configured but the connection carrying them
+    /// would not be encrypted.
+    pub fn credentials_in_the_clear(&self) -> bool {
+        self.user.is_some() && self.pass.is_some() && !self.starttls && !self.tls
     }
 
     /// Blocking; call from `spawn_blocking`.
@@ -88,8 +103,20 @@ impl MailConfig {
             .header(ContentType::TEXT_PLAIN)
             .body(body.to_string())?;
 
+        // Refused rather than sent: handing the relay's password to whatever
+        // is between us and it, once, is enough to lose it. A relay that
+        // wants no encryption also wants no credentials.
+        if self.credentials_in_the_clear() {
+            anyhow::bail!(
+                "refusing to send SMTP credentials over an unencrypted connection: \
+                 set HUSH_SMTP_TLS=1 (port 465) or HUSH_SMTP_STARTTLS=1"
+            );
+        }
+
         tracing::info!("sending email to {to} via {}:{}", self.host, self.port);
-        let mut builder = if self.starttls {
+        let mut builder = if self.tls {
+            SmtpTransport::relay(&self.host)?
+        } else if self.starttls {
             SmtpTransport::starttls_relay(&self.host)?
         } else {
             SmtpTransport::builder_dangerous(&self.host)

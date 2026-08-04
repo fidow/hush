@@ -237,23 +237,14 @@
         </label>
         <hr />
 
-        <h3 data-i18n="recovery.title"></h3>
-        <p class="hint" data-i18n="recovery.note"></p>
-        <code id="recovery-code" class="recovery-code">••••••••••••••••</code>
-        <div class="recovery-row">
-          <button type="button" id="recovery-show" class="secondary" data-i18n="recovery.show"></button>
-          <button type="button" id="recovery-copy" class="secondary" data-i18n="recovery.copy"></button>
-        </div>
-
-        <h3 data-i18n="devices.title"></h3>
-        <p class="hint" data-i18n="devices.note"></p>
-        <ul id="device-list" class="device-list"></ul>
-
-        <h3 data-i18n="restore.title"></h3>
-        <p class="hint" data-i18n="restore.note"></p>
-        <div class="recovery-row">
-          <input id="restore-input" data-i18n-placeholder="restore.placeholder" />
-          <button type="button" id="restore-btn" data-i18n="restore.action"></button>
+        <!-- The server keeps no history, so moving conversations to another
+             device is something the user does deliberately, with a file only
+             their password opens. -->
+        <h3 data-i18n="transfer.title"></h3>
+        <p class="hint" data-i18n="transfer.note"></p>
+        <div class="transfer-row">
+          <button type="button" id="export-btn" class="secondary" data-i18n="transfer.export"></button>
+          <button type="button" id="import-btn" class="secondary" data-i18n="transfer.import"></button>
         </div>
 
         <p id="settings-error" class="error"></p>
@@ -319,6 +310,42 @@
         <div class="confirm-actions">
           <button type="button" id="confirm-cancel" class="secondary" data-i18n="confirm.cancel"></button>
           <button type="button" id="confirm-ok" class="danger"></button>
+        </div>
+      </div>
+    </div>
+
+    <!-- La contraseña que protege un fichero de conversaciones -->
+    <div id="password-dialog" class="overlay hidden">
+      <form class="settings-card confirm-card" id="password-form">
+        <header class="settings-header">
+          <h2 id="password-title"></h2>
+          <button type="button" id="password-close" class="icon-btn" data-i18n-title="settings.close">✕</button>
+        </header>
+        <p class="hint" id="password-note"></p>
+        <input type="password" id="password-input" autocomplete="off" />
+        <p id="password-error" class="error"></p>
+        <div class="confirm-actions">
+          <button type="button" id="password-cancel" class="secondary" data-i18n="confirm.cancel"></button>
+          <button type="submit" id="password-ok"></button>
+        </div>
+      </form>
+    </div>
+
+    <!-- La clave de un contacto ha cambiado: nadie escribe hasta que se decida -->
+    <div id="identity-dialog" class="overlay hidden">
+      <div class="settings-card confirm-card">
+        <header class="settings-header">
+          <h2 id="identity-title"></h2>
+          <button type="button" id="identity-close" class="icon-btn" data-i18n-title="settings.close">✕</button>
+        </header>
+        <p class="hint" id="identity-note"></p>
+        <p class="hint" data-i18n="identity.before"></p>
+        <code id="identity-known" class="fingerprint"></code>
+        <p class="hint" data-i18n="identity.after"></p>
+        <code id="identity-published" class="fingerprint"></code>
+        <div class="confirm-actions">
+          <button type="button" id="identity-later" class="secondary" data-i18n="identity.later"></button>
+          <button type="button" id="identity-accept" class="danger" data-i18n="identity.accept"></button>
         </div>
       </div>
     </div>

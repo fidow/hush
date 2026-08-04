@@ -32,7 +32,8 @@ it has to work.
 
 **3. Create the data folder** that `HUSH_DB` points at and grant write access
 to the account that will run the process. That file holds the accounts and the
-encrypted archive: **it is the only thing that needs backing up.** If `HUSH_DB`
+undelivered mail — not the conversations, which the server never keeps: **it is
+the only thing that needs backing up.** If `HUSH_DB`
 is not set the server refuses to start, so it never ends up writing to an
 unexpected location.
 

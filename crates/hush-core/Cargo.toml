@@ -10,6 +10,10 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 async-trait = "0.1"
 chacha20poly1305 = "0.10"
 data-encoding = "2"
+sha2 = "0.10"
+# Exported conversations are protected by nothing but the password the user
+# chose, so the work of turning it into a key is deliberately expensive.
+argon2 = "0.5"
 # rustls rather than the platform's TLS: native-tls drags in OpenSSL when
 # cross-compiling to Android, and one TLS stack everywhere is one less thing
 # that behaves differently per platform.

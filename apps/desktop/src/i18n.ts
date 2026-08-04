@@ -24,9 +24,9 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "auth.password": "Contraseña",
     "auth.password.placeholder": "mínimo 8 caracteres",
     "auth.history.note":
-      "Tus conversaciones se guardan cifradas con una clave de recuperación que se genera automáticamente. Podrás verla en Ajustes y usarla para recuperar el historial en otro dispositivo.",
+      "Tus conversaciones se guardan cifradas solo en este dispositivo: el servidor no guarda historial. Desde Ajustes puedes exportarlas a un fichero con contraseña para llevártelas a otro sitio.",
     "auth.signin.note":
-      "En un dispositivo nuevo se generan claves de cifrado nuevas. Para traerte el historial, entra y usa tu clave de recuperación desde Ajustes.",
+      "Solo puede haber un dispositivo a la vez: al entrar aquí se cerrará la sesión donde la tuvieras abierta. Para traerte las conversaciones, expórtalas allí e impórtalas aquí desde Ajustes.",
     "auth.signin": "Entrar",
     "auth.register": "Crear cuenta",
     "auth.forgot": "¿Has olvidado tu contraseña?",
@@ -40,7 +40,7 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "forgot.done": "Contraseña cambiada, ya puedes entrar",
     "forgot.back": "Volver",
     "forgot.keyNote":
-      "Cambiar la contraseña no afecta a tu clave de recuperación: esa es la que restaura el historial en otro dispositivo. Se cerrará la sesión en todos tus dispositivos.",
+      "Cambiar la contraseña no afecta a las conversaciones guardadas en este dispositivo. Se cerrará la sesión.",
     "auth.toRegister": "¿No tienes cuenta? Crear una",
     "auth.toSignin": "¿Ya tienes cuenta? Entrar",
 
@@ -137,19 +137,14 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "avatar.updated": "Foto actualizada",
     "avatar.failed": "No se pudo cambiar la foto",
 
-    "devices.title": "Dispositivos",
-    "devices.note":
-      "Sesiones abiertas en esta cuenta. Revoca cualquiera que no reconozcas: dejará de recibir mensajes al instante.",
-    "devices.thisOne": "este dispositivo",
-    "devices.connected": "conectado",
-    "devices.lastSeen": "últ. vez {when}",
-    "devices.never": "sin usar",
-    "devices.revoke": "Revocar",
-    "devices.revokeTitle": "¿Revocar {name}?",
-    "devices.revokeNote":
-      "Ese dispositivo se desconectará y tendrá que iniciar sesión otra vez para volver a recibir mensajes.",
-    "devices.revoked": "Dispositivo revocado",
-    "devices.failed": "No se pudieron cargar los dispositivos",
+    "identity.title": "La clave de {name} ha cambiado",
+    "identity.note":
+      "Puede que {name} haya reinstalado la app o cambiado de dispositivo. También puede ser que alguien se haya puesto en medio. Hasta que lo confirmes no se le envía nada ni se lee nada suyo.",
+    "identity.before": "La clave que teníamos:",
+    "identity.after": "La que publica ahora:",
+    "identity.later": "Ahora no",
+    "identity.accept": "Es esa persona",
+    "identity.accepted": "Clave aceptada",
 
     "update.title": "Versión {version} disponible",
     "update.note": "Hay una versión nueva de Hush lista para instalar.",
@@ -160,21 +155,19 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "about.note":
       "Los mensajes van cifrados de extremo a extremo: el servidor solo transporta datos que no puede leer. El intercambio de claves es resistente a computación cuántica, y lo que se guarda en este equipo está cifrado con una clave propia del dispositivo.",
 
-    "recovery.title": "Clave de recuperación",
-    "recovery.note":
-      "Guárdala en un lugar seguro. Es lo único que permite recuperar tu historial en otro dispositivo, y nadie más la tiene: ni siquiera el servidor.",
-    "recovery.show": "Mostrar",
-    "recovery.hide": "Ocultar",
-    "recovery.copy": "Copiar",
-    "recovery.copied": "Clave copiada",
-
-    "restore.title": "Recuperar historial",
-    "restore.note":
-      "Pega aquí la clave de recuperación de otro dispositivo para traerte sus conversaciones.",
-    "restore.placeholder": "XXXX-XXXX-XXXX-…",
-    "restore.action": "Recuperar",
-    "restore.done": "Historial recuperado: {n} mensajes",
-    "restore.empty": "No había historial que recuperar",
+    "transfer.title": "Llevarte las conversaciones",
+    "transfer.note":
+      "El servidor no guarda historial: lo que tienes es lo que ha recibido este dispositivo. Para llevártelo a otro, expórtalo a un fichero e impórtalo allí.",
+    "transfer.export": "Exportar",
+    "transfer.import": "Importar",
+    "transfer.exportTitle": "Exportar conversaciones",
+    "transfer.exportNote":
+      "Elige una contraseña larga: es lo único que protege el fichero, y si la pierdes no hay forma de abrirlo. Mínimo 10 caracteres.",
+    "transfer.exported": "Conversaciones exportadas",
+    "transfer.importTitle": "Importar conversaciones",
+    "transfer.importNote": "Escribe la contraseña con la que se creó el fichero.",
+    "transfer.imported": "Importados {n} mensajes",
+    "transfer.importedNothing": "No había nada nuevo que importar",
 
     "image.preview": "Imagen a enviar",
     "image.send": "Enviar imagen",
@@ -273,10 +266,15 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "err.request_failed": "La petición fue rechazada",
     "err.connection_failed": "No se pudo conectar con el servidor",
     "err.no_session": "No has iniciado sesión",
-    "err.wrong_recovery_key": "Esa clave de recuperación no es la de esta cuenta",
-    "err.invalid_recovery_key": "La clave de recuperación no tiene un formato válido",
-    "err.no_recovery_key":
-      "Este dispositivo aún no tiene la clave de la cuenta. Recupérala aquí abajo con la clave de tu otro dispositivo.",
+    "err.export_password_too_short": "La contraseña debe tener al menos 10 caracteres",
+    "err.import_wrong_password": "Contraseña incorrecta",
+    "err.import_not_an_export": "Ese fichero no es una exportación de Hush",
+    "err.import_unsupported_version":
+      "Ese fichero lo hizo una versión más nueva de Hush",
+    "err.identity_changed":
+      "La clave de ese contacto ha cambiado. Confírmalo antes de seguir escribiéndole.",
+    "err.server_busy": "El servidor está saturado, inténtalo en un momento",
+    "err.request_timeout": "La petición tardó demasiado",
     "err.self_contact": "No puedes añadirte a ti mismo",
     "err.already_contacts": "Ya sois contactos",
     "err.request_pending": "Ya hay una solicitud pendiente",
@@ -296,9 +294,9 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "auth.password": "Password",
     "auth.password.placeholder": "at least 8 characters",
     "auth.history.note":
-      "Your conversations are stored encrypted under a recovery key generated automatically. You can view it in Settings and use it to restore your history on another device.",
+      "Your conversations are kept encrypted on this device alone: the server stores no history. From Settings you can export them to a password-protected file to take them elsewhere.",
     "auth.signin.note":
-      "A new device generates new encryption keys. To bring your history along, sign in and use your recovery key from Settings.",
+      "Only one device at a time: signing in here signs you out wherever else you were. To bring your conversations along, export them there and import them here from Settings.",
     "auth.signin": "Sign in",
     "auth.register": "Create account",
     "auth.forgot": "Forgot your password?",
@@ -311,7 +309,7 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "forgot.done": "Password changed, you can sign in now",
     "forgot.back": "Back",
     "forgot.keyNote":
-      "Changing your password does not affect your recovery key: that is what restores your history on another device. You will be signed out on all your devices.",
+      "Changing your password does not affect the conversations stored on this device. You will be signed out.",
     "auth.toRegister": "No account yet? Create one",
     "auth.toSignin": "Already have an account? Sign in",
 
@@ -408,19 +406,14 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "avatar.updated": "Picture updated",
     "avatar.failed": "Could not change the picture",
 
-    "devices.title": "Devices",
-    "devices.note":
-      "Sessions signed in to this account. Revoke anything you do not recognise: it stops receiving messages at once.",
-    "devices.thisOne": "this device",
-    "devices.connected": "connected",
-    "devices.lastSeen": "last seen {when}",
-    "devices.never": "never used",
-    "devices.revoke": "Revoke",
-    "devices.revokeTitle": "Revoke {name}?",
-    "devices.revokeNote":
-      "That device will be disconnected and will have to sign in again before it receives messages.",
-    "devices.revoked": "Device revoked",
-    "devices.failed": "Could not load the devices",
+    "identity.title": "{name}'s key has changed",
+    "identity.note":
+      "{name} may have reinstalled the app or moved to another device. Somebody may also have stepped into the middle. Until you confirm it, nothing is sent to them and nothing of theirs is read.",
+    "identity.before": "The key we had:",
+    "identity.after": "The one they publish now:",
+    "identity.later": "Not now",
+    "identity.accept": "It is really them",
+    "identity.accepted": "Key accepted",
 
     "update.title": "Version {version} available",
     "update.note": "A new version of Hush is ready to install.",
@@ -431,21 +424,19 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "about.note":
       "Messages are end-to-end encrypted: the server only carries data it cannot read. The key exchange is quantum-resistant, and whatever is stored on this computer is encrypted with a key belonging to this device.",
 
-    "recovery.title": "Recovery key",
-    "recovery.note":
-      "Keep it somewhere safe. It is the only thing that can restore your history on another device, and nobody else holds it: not even the server.",
-    "recovery.show": "Show",
-    "recovery.hide": "Hide",
-    "recovery.copy": "Copy",
-    "recovery.copied": "Recovery key copied",
-
-    "restore.title": "Restore history",
-    "restore.note":
-      "Paste the recovery key from another device to bring its conversations here.",
-    "restore.placeholder": "XXXX-XXXX-XXXX-…",
-    "restore.action": "Restore",
-    "restore.done": "History restored: {n} messages",
-    "restore.empty": "There was no history to restore",
+    "transfer.title": "Taking your conversations with you",
+    "transfer.note":
+      "The server keeps no history: what you have is what this device received. To move it elsewhere, export it to a file and import that file there.",
+    "transfer.export": "Export",
+    "transfer.import": "Import",
+    "transfer.exportTitle": "Export conversations",
+    "transfer.exportNote":
+      "Choose a long password: it is the only thing protecting the file, and losing it means the file can never be opened. At least 10 characters.",
+    "transfer.exported": "Conversations exported",
+    "transfer.importTitle": "Import conversations",
+    "transfer.importNote": "Type the password the file was made with.",
+    "transfer.imported": "Imported {n} messages",
+    "transfer.importedNothing": "There was nothing new to import",
 
     "image.preview": "Image to send",
     "image.send": "Send image",
@@ -543,10 +534,14 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "err.request_failed": "The request was rejected",
     "err.connection_failed": "Could not reach the server",
     "err.no_session": "You are not signed in",
-    "err.wrong_recovery_key": "That recovery key does not belong to this account",
-    "err.invalid_recovery_key": "That recovery key is not in a valid format",
-    "err.no_recovery_key":
-      "This device doesn't hold the account key yet. Restore it below using the key from your other device.",
+    "err.export_password_too_short": "The password must be at least 10 characters",
+    "err.import_wrong_password": "Wrong password",
+    "err.import_not_an_export": "That file is not a Hush export",
+    "err.import_unsupported_version": "That file was made by a newer version of Hush",
+    "err.identity_changed":
+      "That contact's key has changed. Confirm it before writing to them again.",
+    "err.server_busy": "The server is busy, try again in a moment",
+    "err.request_timeout": "The request took too long",
     "err.self_contact": "You cannot add yourself",
     "err.already_contacts": "You are already contacts",
     "err.request_pending": "A request is already pending",

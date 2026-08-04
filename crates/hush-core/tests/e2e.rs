@@ -69,15 +69,15 @@ async fn recv_one(
     .expect("timed out waiting for message")
 }
 
-/// A second device restores the conversation history from the encrypted
-/// archive with the recovery key, and only with the right one. Restoring is
-/// available at any time, not only while signing in.
+/// Conversations move to another device through an exported file, and only
+/// with the password that made it. The server holds no history, so this is
+/// the whole of the migration path.
 #[tokio::test]
-async fn history_follows_the_user_to_a_new_device() {
+async fn conversations_move_between_devices_through_an_export() {
     use hush_core::HushClient;
 
     let (base, pool) = spawn_server().await;
-    let dir = std::env::temp_dir().join(format!("hush-devices-{}", uuid::Uuid::new_v4()));
+    let dir = std::env::temp_dir().join(format!("hush-export-{}", uuid::Uuid::new_v4()));
 
     // Bob exists so Alice has someone to talk to.
     let bob = HushClient::spawn(dir.join("bob.db"));
@@ -86,91 +86,73 @@ async fn history_follows_the_user_to_a_new_device() {
         .unwrap();
     bob.verify(&pending_code(&pool, "bob").await).await.unwrap();
 
-    // Alice's first device sends a message and reads its recovery key.
-    let device1 = HushClient::spawn(dir.join("device1.db"));
-    device1
-        .register(&base, "alice", "Alicia", "alice@example.com", "supersecreta")
+    let old = HushClient::spawn(dir.join("old.db"));
+    old.register(&base, "alice", "Alicia", "alice@example.com", "supersecreta")
         .await
         .unwrap();
-    device1
-        .verify(&pending_code(&pool, "alice").await)
-        .await
-        .unwrap();
-    device1.connect().await.unwrap();
+    old.verify(&pending_code(&pool, "alice").await).await.unwrap();
+    old.connect().await.unwrap();
     bob.connect().await.unwrap();
 
     // Become contacts first: messaging strangers is refused.
-    device1.request_contact("bob").await.unwrap();
+    old.request_contact("bob").await.unwrap();
     bob.accept_contact("alice").await.unwrap();
     assert_eq!(
-        device1.contacts().await.unwrap()[0].state,
+        old.contacts().await.unwrap()[0].state,
         "accepted",
         "the link must be visible from both sides"
     );
 
-    device1.send_text("bob", "mensaje que debe sobrevivir").await.unwrap();
-    let recovery = device1.recovery_code().await.unwrap();
-    assert!(recovery.contains('-'), "code is grouped for reading: {recovery}");
+    old.send_text("bob", "mensaje que debe sobrevivir").await.unwrap();
+    bob.send_text("alice", "y esta respuesta").await.unwrap();
+    wait_for_text(&old, "bob", "y esta respuesta").await;
 
-    // The second device signs in with no history and, crucially, no key of
-    // its own: the recovery key belongs to the account, not the device.
-    let device2 = HushClient::spawn(dir.join("device2.db"));
-    device2.login(&base, "alice", "supersecreta").await.unwrap();
-    assert!(device2.history("bob").await.unwrap().is_empty());
-    assert_eq!(
-        device2.recovery_code().await.unwrap_err(),
-        "no_recovery_key",
-        "a fresh device must not invent a second key"
+    let file = old.export_conversations("contraseña-del-backup").await.unwrap();
+    assert!(
+        !String::from_utf8_lossy(&file).contains("mensaje que debe sobrevivir"),
+        "the file must not carry the conversation in the clear"
     );
 
-    // Somebody else's key cannot read the archive.
-    let other = HushClient::spawn(dir.join("other.db"));
-    other
-        .register(&base, "mallory", "M", "m@example.com", "supersecreta")
-        .await
-        .unwrap();
-    other
-        .verify(&pending_code(&pool, "mallory").await)
-        .await
-        .unwrap();
-    let err = device2
-        .restore_history(&other.recovery_code().await.unwrap())
-        .await
-        .unwrap_err();
-    assert_eq!(err, "wrong_recovery_key");
+    // The new device starts empty, and the wrong password leaves it that way.
+    let new = HushClient::spawn(dir.join("new.db"));
+    new.login(&base, "alice", "supersecreta").await.unwrap();
+    assert!(new.history("bob").await.unwrap().is_empty());
+    assert_eq!(
+        new.import_conversations(file.clone(), "contraseña-equivocada")
+            .await
+            .unwrap_err(),
+        "import_wrong_password"
+    );
+    assert!(new.history("bob").await.unwrap().is_empty());
 
-    // With the real key the conversation comes back.
-    let restored = device2.restore_history(&recovery).await.unwrap();
-    assert_eq!(restored, 1);
-    let history = device2.history("bob").await.unwrap();
-    assert_eq!(history.len(), 1);
-    assert_eq!(history[0].text, "mensaje que debe sobrevivir");
-    assert!(history[0].mine);
-    assert!(device2
-        .contacts()
-        .await
-        .unwrap()
-        .iter()
-        .any(|c| c.username == "bob"));
+    // With the right one the conversation comes back, both sides of it.
+    assert_eq!(
+        new.import_conversations(file.clone(), "contraseña-del-backup")
+            .await
+            .unwrap(),
+        2
+    );
+    let history = new.history("bob").await.unwrap();
+    let texts: Vec<&str> = history.iter().map(|m| m.text.as_str()).collect();
+    assert!(texts.contains(&"mensaje que debe sobrevivir"));
+    assert!(texts.contains(&"y esta respuesta"));
+    assert!(
+        history
+            .iter()
+            .find(|m| m.text == "mensaje que debe sobrevivir")
+            .expect("ours is there")
+            .mine,
+        "who wrote what has to survive the trip"
+    );
 
-    // Both devices now report the same key, and messages sent from the second
-    // one land in the same archive.
-    assert_eq!(device2.recovery_code().await.unwrap(), recovery);
-    device2.connect().await.unwrap();
-    device2.send_text("bob", "desde el segundo dispositivo").await.unwrap();
-
-    let device3 = HushClient::spawn(dir.join("device3.db"));
-    device3.login(&base, "alice", "supersecreta").await.unwrap();
-    assert_eq!(device3.restore_history(&recovery).await.unwrap(), 2);
-    let texts: Vec<String> = device3
-        .history("bob")
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|m| m.text)
-        .collect();
-    assert!(texts.contains(&"mensaje que debe sobrevivir".to_string()));
-    assert!(texts.contains(&"desde el segundo dispositivo".to_string()));
+    // Importing the same file again changes nothing: the device already has
+    // every message in it.
+    assert_eq!(
+        new.import_conversations(file, "contraseña-del-backup")
+            .await
+            .unwrap(),
+        0
+    );
 }
 
 /// Waits for `text` to show up in the conversation with `contact`.
@@ -324,14 +306,15 @@ async fn a_picture_set_before_the_contact_existed_still_reaches_them() {
     }
 }
 
-/// Two devices of the same account, both signed in at once: each is written
-/// to separately, and what one sends shows up on the other.
+/// An account is one device at a time: signing in somewhere else takes it
+/// over, the previous session's token stops working, and the conversation
+/// carries on at the new place.
 #[tokio::test]
-async fn both_devices_of_an_account_see_the_conversation() {
+async fn signing_in_elsewhere_takes_the_account_over() {
     use hush_core::HushClient;
 
     let (base, pool) = spawn_server().await;
-    let dir = std::env::temp_dir().join(format!("hush-multi-{}", uuid::Uuid::new_v4()));
+    let dir = std::env::temp_dir().join(format!("hush-takeover-{}", uuid::Uuid::new_v4()));
 
     let laptop = HushClient::spawn(dir.join("laptop.db"));
     laptop
@@ -349,38 +332,50 @@ async fn both_devices_of_an_account_see_the_conversation() {
 
     laptop.request_contact("bob").await.unwrap();
     bob.accept_contact("alice").await.unwrap();
+    laptop.send_text("bob", "desde el portátil").await.unwrap();
+    wait_for_text(&bob, "alice", "desde el portátil").await;
 
-    // Alice signs in on a second device without taking over the first.
+    // Alice signs in on the phone. That is now where the account lives.
     let phone = HushClient::spawn(dir.join("phone.db"));
     phone.login(&base, "alice", "supersecreta").await.unwrap();
     phone.connect().await.unwrap();
 
-    // Bob writes once; both of Alice's devices receive their own copy.
-    bob.send_text("alice", "os veo a los dos").await.unwrap();
-    wait_for_text(&laptop, "bob", "os veo a los dos").await;
-    wait_for_text(&phone, "bob", "os veo a los dos").await;
+    // The phone sends happily: it has never pinned a key for Bob, so the one
+    // he publishes is the one it learns.
+    phone.send_text("bob", "y ahora desde el teléfono").await.unwrap();
 
-    // What Alice writes on one device shows up on the other, on her side of
-    // the conversation, and reaches Bob.
-    laptop.send_text("bob", "escribo desde el portátil").await.unwrap();
-    wait_for_text(&bob, "alice", "escribo desde el portátil").await;
-    wait_for_text(&phone, "bob", "escribo desde el portátil").await;
+    // Bob is the interesting side. A new device means a new identity key, and
+    // Bob pinned the old one. He cannot read what arrived and must not write
+    // either, until somebody confirms it is still Alice — a relay able to
+    // swap that key quietly is a relay able to read the conversation.
+    assert_eq!(
+        bob.send_text("alice", "te leo en el nuevo").await.unwrap_err(),
+        "identity_changed",
+        "a key that changed must stop the message, not be adopted quietly"
+    );
     assert!(
-        phone
-            .history("bob")
+        !bob.history("alice")
             .await
             .unwrap()
             .iter()
-            .find(|m| m.text == "escribo desde el portátil")
-            .expect("the copy is there")
-            .mine,
-        "a message we wrote elsewhere is still ours"
+            .any(|m| m.text == "y ahora desde el teléfono"),
+        "nothing under the new key may be read before it is accepted"
     );
 
-    // And the older device keeps working after the newer one joined.
-    phone.send_text("bob", "y desde el teléfono").await.unwrap();
-    wait_for_text(&bob, "alice", "y desde el teléfono").await;
-    wait_for_text(&laptop, "bob", "y desde el teléfono").await;
+    // Once Bob accepts the change the conversation carries on, and what the
+    // phone sent meanwhile is sent again rather than lost.
+    bob.accept_identity("alice").await.unwrap();
+    bob.send_text("alice", "te leo en el nuevo").await.unwrap();
+    wait_for_text(&phone, "bob", "te leo en el nuevo").await;
+    wait_for_text(&bob, "alice", "y ahora desde el teléfono").await;
+
+    // The laptop's token died the moment the phone signed in, so anything it
+    // tries now is refused rather than quietly working on.
+    let refused = laptop.send_text("bob", "sigo aquí").await;
+    assert!(
+        refused.is_err(),
+        "the previous device must be signed out, not left running"
+    );
 }
 
 /// Blocking someone, lifting the block and adding them again has to leave a
@@ -570,14 +565,22 @@ async fn deleting_for_everyone_leaves_no_trace_in_the_history() {
         "the deleted message and the control message must both be gone"
     );
 
-    // And it must not come back when another device restores the archive.
-    let recovery = alice.recovery_code().await.unwrap();
+    // And it must not come back through an export either: what was deleted
+    // here is gone, and the control message that deleted it was never a
+    // conversation line to begin with.
+    let file = alice.export_conversations("contraseña-del-backup").await.unwrap();
     let device2 = HushClient::spawn(dir.join("device2.db"));
     device2.login(&base, "alice", "supersecreta").await.unwrap();
-    device2.restore_history(&recovery).await.ok();
+    assert_eq!(
+        device2
+            .import_conversations(file, "contraseña-del-backup")
+            .await
+            .unwrap(),
+        0
+    );
     assert!(
         device2.history("bob").await.unwrap().is_empty(),
-        "the archive must not hold control messages either"
+        "an export must not carry control messages either"
     );
 }
 
@@ -604,7 +607,7 @@ async fn encrypted_roundtrip_with_offline_delivery() {
     alice.ensure_session("bob", 1, &bundle).await.unwrap();
     let envelope = alice.encrypt("bob", 1, b"hola bob, esto es secreto").await.unwrap();
     assert!(!envelope.contains("secreto"), "envelope must not leak plaintext");
-    alice_api.send_message("bob", &[(1, envelope.clone())]).await.unwrap();
+    alice_api.send_message("bob", &envelope).await.unwrap();
 
     // Bob comes online, gets the backlog, decrypts.
     let mut bob_rx = bob_api.stream().await.unwrap();
@@ -617,7 +620,7 @@ async fn encrypted_roundtrip_with_offline_delivery() {
     // Bob replies over the ratchet established by the prekey message.
     assert!(bob.has_session("alice", 1).await.unwrap());
     let envelope = bob.encrypt("alice", 1, b"hola alice, recibido").await.unwrap();
-    bob_api.send_message("alice", &[(1, envelope.clone())]).await.unwrap();
+    bob_api.send_message("alice", &envelope).await.unwrap();
 
     let mut alice_rx = alice_api.stream().await.unwrap();
     let msg = recv_one(&mut alice_rx).await;
@@ -629,7 +632,7 @@ async fn encrypted_roundtrip_with_offline_delivery() {
     // A second message from Alice uses the ratchet (no prekey consumption).
     let envelope = alice.encrypt("bob", 1, b"segundo mensaje").await.unwrap();
     assert!(envelope.contains("\"signal\""), "ratchet messages use type signal");
-    alice_api.send_message("bob", &[(1, envelope.clone())]).await.unwrap();
+    alice_api.send_message("bob", &envelope).await.unwrap();
     let msg = recv_one(&mut bob_rx).await;
     let plain = bob.decrypt("alice", 1, &msg.body).await.unwrap();
     assert_eq!(plain, b"segundo mensaje");

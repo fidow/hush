@@ -65,10 +65,20 @@ async fn register(
         .to_string()
 }
 
-/// Links two accounts as accepted contacts, which messaging requires.
+/// Links alice and bob as accepted contacts, which messaging requires.
 async fn befriend(client: &reqwest::Client, base: &str, from: &str, to: &str) {
+    befriend_named(client, base, (from, "alice"), (to, "bob")).await;
+}
+
+/// The same, for any pair of accounts.
+async fn befriend_named(
+    client: &reqwest::Client,
+    base: &str,
+    a: (&str, &str),
+    b: (&str, &str),
+) {
     // The second request from the other side counts as an acceptance.
-    for (requester, target) in [(from, "bob"), (to, "alice")] {
+    for (requester, target) in [(a.0, b.1), (b.0, a.1)] {
         let res = client
             .post(format!("{base}/v1/contacts/{target}"))
             .bearer_auth(requester)
@@ -77,6 +87,151 @@ async fn befriend(client: &reqwest::Client, base: &str, from: &str, to: &str) {
             .unwrap();
         assert!(res.status().is_success(), "befriend failed: {}", res.status());
     }
+}
+
+/// Blocking is a decision about the blocker's own mailbox, and only they may
+/// undo it. Removing a contact drops both sides of an ordinary link, so the
+/// blocked party must not be able to reach for that and quietly clear the
+/// block they are on the wrong end of.
+#[tokio::test]
+async fn a_blocked_user_cannot_lift_their_own_block() {
+    let (base, pool) = spawn_server().await;
+    let client = reqwest::Client::new();
+    let alice = register(&client, &base, &pool, "alice", "Alicia").await;
+    let mallory = register(&client, &base, &pool, "mallory", "Mallory").await;
+    befriend_named(&client, &base, (&alice, "alice"), (&mallory, "mallory")).await;
+
+    let res = client
+        .post(format!("{base}/v1/contacts/mallory/block"))
+        .bearer_auth(&alice)
+        .send()
+        .await
+        .unwrap();
+    assert!(res.status().is_success());
+
+    // Mallory asks for the link to be forgotten, from her side.
+    let res = client
+        .delete(format!("{base}/v1/contacts/alice"))
+        .bearer_auth(&mallory)
+        .send()
+        .await
+        .unwrap();
+    assert!(res.status().is_success());
+
+    // Alice's block has to still be there, and still be doing its job.
+    let state: Option<String> =
+        sqlx::query_scalar("SELECT state FROM contacts WHERE owner = 'alice' AND peer = 'mallory'")
+            .fetch_optional(&pool)
+            .await
+            .unwrap();
+    assert_eq!(state.as_deref(), Some("blocked"), "the block must survive");
+
+    let res = client
+        .put(format!("{base}/v1/messages/alice"))
+        .bearer_auth(&mallory)
+        .json(&json!({ "body": "sigo aquí" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 403, "a blocked user must not get through");
+}
+
+/// Key bundles are for people the account agreed to talk to. Each fetch spends
+/// one of its one-time prekeys, so an endpoint open to any signed-in stranger
+/// is one that lets a stranger exhaust them.
+#[tokio::test]
+async fn key_bundles_are_only_for_accepted_contacts() {
+    let (base, pool) = spawn_server().await;
+    let client = reqwest::Client::new();
+    let alice = register(&client, &base, &pool, "alice", "Alicia").await;
+    let bob = register(&client, &base, &pool, "bob", "Roberto").await;
+    let stranger = register(&client, &base, &pool, "mallory", "Mallory").await;
+
+    client
+        .put(format!("{base}/v1/keys"))
+        .bearer_auth(&alice)
+        .json(&json!({
+            "bundle_static": { "spk": "x" },
+            "one_time_prekeys": [{ "kind": "ec", "data": "EC1" }],
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    let fetch = |token: String| {
+        let client = client.clone();
+        let base = base.clone();
+        async move {
+            client
+                .get(format!("{base}/v1/keys/alice"))
+                .bearer_auth(token)
+                .send()
+                .await
+                .unwrap()
+                .status()
+        }
+    };
+
+    // A stranger gets the same answer as for a name that does not exist.
+    assert_eq!(fetch(stranger).await, 404);
+    // And the prekey they were refused is still there for a real contact.
+    befriend(&client, &base, &alice, &bob).await;
+    assert_eq!(fetch(bob).await, 200);
+    let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM one_time_prekeys")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(left, 0, "the contact's fetch is the one that spent it");
+}
+
+/// Whether somebody is at their computer, and when, is not for strangers who
+/// merely know their name.
+#[tokio::test]
+async fn presence_is_only_visible_to_contacts() {
+    let (base, pool) = spawn_server().await;
+    let client = reqwest::Client::new();
+    let alice = register(&client, &base, &pool, "alice", "Alicia").await;
+    let bob = register(&client, &base, &pool, "bob", "Roberto").await;
+    let stranger = register(&client, &base, &pool, "mallory", "Mallory").await;
+    befriend(&client, &base, &alice, &bob).await;
+
+    // Alice opens a stream, so she is connected for as long as it is held.
+    let stream = client
+        .get(format!("{base}/v1/messages/stream"))
+        .bearer_auth(&alice)
+        .send()
+        .await
+        .unwrap();
+    // Give the server a moment to register the listener.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let presence = |token: String| {
+        let client = client.clone();
+        let base = base.clone();
+        async move {
+            client
+                .post(format!("{base}/v1/presence"))
+                .bearer_auth(token)
+                .json(&json!({ "usernames": ["alice"] }))
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap()["presence"]["alice"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        }
+    };
+
+    assert_eq!(presence(bob).await, "online", "a contact sees her");
+    assert_eq!(
+        presence(stranger).await,
+        "offline",
+        "a stranger must not be able to watch when she is around"
+    );
+    drop(stream);
 }
 
 /// Reads the next SSE event of the given type, with a timeout.

@@ -10,8 +10,8 @@ use std::path::PathBuf;
 
 use tokio::sync::{mpsc, oneshot};
 
-use crate::archive::{ArchiveEntry, ArchiveKey};
 use crate::db::{LocalDb, Profile, StoredMessage};
+use crate::transfer::{Export, ExportedContact, ExportedMessage};
 use crate::{ApiClient, ContactEntry, Engine, IncomingMessage, ServerEvent};
 
 /// What the UI is told about, over the event channel.
@@ -23,12 +23,23 @@ pub enum ClientEvent {
     /// A message was sent again after rebuilding a session, so it now travels
     /// under a different id.
     MessageResent { old_id: String, new_id: String },
-    /// Something we wrote on another device of this account.
-    OwnMessage(DecryptedMessage),
     /// The contact list changed (a request arrived, was accepted, …).
     ContactsChanged,
     /// One of our messages was delivered or read.
     Receipt { id: String, state: String, at: i64 },
+    /// A contact is publishing an identity key that is not the one we pinned.
+    ///
+    /// Either they reinstalled, or somebody is standing between us. Nothing
+    /// is sent to them and nothing of theirs is read until the person using
+    /// the app decides which it was, so this goes to the interface rather
+    /// than being resolved quietly.
+    IdentityChanged {
+        contact: String,
+        /// Fingerprints of the key we trusted and the one being offered, to
+        /// be read out over some other channel and compared.
+        known: String,
+        published: String,
+    },
 }
 
 /// A decrypted incoming message, ready for display.
@@ -42,6 +53,14 @@ pub struct DecryptedMessage {
     pub created_at: i64,
 }
 
+/// Why a message could not be encrypted for its recipient.
+enum SendRefused {
+    /// The contact is publishing a key we never agreed to. Held back until
+    /// the user says whether it is really them.
+    IdentityChanged { known: String, published: String },
+    Other(anyhow::Error),
+}
+
 /// Wire format inside the encrypted envelope. Plain (non-JSON) payloads from
 /// older clients are treated as text.
 fn encode_content(kind: &str, content: &str) -> Vec<u8> {
@@ -50,23 +69,25 @@ fn encode_content(kind: &str, content: &str) -> Vec<u8> {
         .into_bytes()
 }
 
-/// A copy of an outgoing message for our own other devices: they need to know
-/// who it was for, since the envelope only says it came from us.
-fn encode_sync(to: &str, kind: &str, content: &str) -> String {
-    serde_json::json!({ "to": to, "kind": kind, "content": content }).to_string()
+/// Largest profile picture we will accept from a contact, as a data URL.
+/// Generous for a portrait, small enough that a contact cannot use it to fill
+/// this device's storage.
+const MAX_AVATAR_BYTES: usize = 512 * 1024;
+
+/// Whether a string is a picture we are willing to put in an `<img>`.
+///
+/// A profile picture arrives from the contact, and the interface hands it
+/// straight to the webview. Anything but an inline image would be fetched
+/// from wherever it points, which turns the picture into a beacon: whoever
+/// chose it learns the address of everyone who so much as opens their
+/// conversation list, and roughly when. That is precisely the metadata this
+/// app exists to keep to itself, so only `data:image/…` is allowed through.
+pub(crate) fn is_picture(data_url: &str) -> bool {
+    data_url.starts_with("data:image/") && data_url.len() <= MAX_AVATAR_BYTES
 }
 
-fn decode_sync(content: &str) -> Option<(String, String, String)> {
-    let v: serde_json::Value = serde_json::from_str(content).ok()?;
-    Some((
-        v["to"].as_str()?.to_string(),
-        v["kind"].as_str()?.to_string(),
-        v["content"].as_str()?.to_string(),
-    ))
-}
-
-/// A name for this device in the account's device list. Nothing sensitive:
-/// the computer's name is what makes one device recognisable from another.
+/// A name for this device, for the server's log. Nothing sensitive: the
+/// computer's name is what makes one sign-in recognisable from another.
 fn device_name() -> String {
     std::env::var("COMPUTERNAME")
         .or_else(|_| std::env::var("HOSTNAME"))
@@ -129,15 +150,22 @@ enum Command {
         password: String,
         reply: oneshot::Sender<Result<(), String>>,
     },
-    /// The recovery key held by this device, shown to the user on request.
-    RecoveryCode {
-        reply: oneshot::Sender<Result<String, String>>,
+    /// Packs every conversation into an encrypted file.
+    ExportConversations {
+        password: String,
+        reply: oneshot::Sender<Result<Vec<u8>, String>>,
     },
-    /// Adopts a recovery key and pulls the archive down. Usable at any time,
-    /// not just right after signing in.
-    RestoreHistory {
-        code: String,
+    /// Merges an exported file into this device's conversations.
+    ImportConversations {
+        bytes: Vec<u8>,
+        password: String,
         reply: oneshot::Sender<Result<usize, String>>,
+    },
+    /// Accepts a contact's new identity key after the user was shown that it
+    /// changed and said it was really them.
+    AcceptIdentity {
+        contact: String,
+        reply: oneshot::Sender<Result<(), String>>,
     },
     Connect {
         reply: oneshot::Sender<Result<mpsc::Receiver<ClientEvent>, String>>,
@@ -186,14 +214,6 @@ enum Command {
     /// Our own profile picture, handed to every accepted contact.
     SetAvatar {
         avatar: Option<String>,
-        reply: oneshot::Sender<Result<(), String>>,
-    },
-    /// The devices signed in to this account.
-    Devices {
-        reply: oneshot::Sender<Result<Vec<serde_json::Value>, String>>,
-    },
-    RevokeDevice {
-        device: i64,
         reply: oneshot::Sender<Result<(), String>>,
     },
     History {
@@ -370,16 +390,35 @@ impl HushClient {
         .await
     }
 
-    /// The recovery key of this device, formatted for the user to copy.
-    pub async fn recovery_code(&self) -> Result<String, String> {
-        self.request(|reply| Command::RecoveryCode { reply }).await
+    /// Packs every conversation on this device into an encrypted file,
+    /// readable only with `password`.
+    pub async fn export_conversations(&self, password: &str) -> Result<Vec<u8>, String> {
+        let password = password.to_string();
+        self.request(|reply| Command::ExportConversations { password, reply })
+            .await
     }
 
-    /// Adopts `code` as the history key and downloads the archive. Returns
-    /// how many messages were restored.
-    pub async fn restore_history(&self, code: &str) -> Result<usize, String> {
-        let code = code.to_string();
-        self.request(|reply| Command::RestoreHistory { code, reply })
+    /// Merges a file produced by [`export_conversations`](Self::export_conversations)
+    /// into this device. Returns how many messages it did not already have.
+    pub async fn import_conversations(
+        &self,
+        bytes: Vec<u8>,
+        password: &str,
+    ) -> Result<usize, String> {
+        let password = password.to_string();
+        self.request(|reply| Command::ImportConversations {
+            bytes,
+            password,
+            reply,
+        })
+        .await
+    }
+
+    /// Accepts the new identity key a contact is publishing, after the user
+    /// has been shown the change and confirmed it was really them.
+    pub async fn accept_identity(&self, contact: &str) -> Result<(), String> {
+        let contact = contact.to_string();
+        self.request(|reply| Command::AcceptIdentity { contact, reply })
             .await
     }
 
@@ -472,17 +511,6 @@ impl HushClient {
         self.request(|reply| Command::SetAvatar { avatar, reply }).await
     }
 
-    /// The devices signed in to this account.
-    pub async fn devices(&self) -> Result<Vec<serde_json::Value>, String> {
-        self.request(|reply| Command::Devices { reply }).await
-    }
-
-    /// Signs a device out for good.
-    pub async fn revoke_device(&self, device: i64) -> Result<(), String> {
-        self.request(|reply| Command::RevokeDevice { device, reply })
-            .await
-    }
-
     /// Deletes a message. With `for_everyone` the other side is asked to
     /// delete their copy as well.
     pub async fn delete_message(&self, id: &str, for_everyone: bool) -> Result<(), String> {
@@ -541,7 +569,6 @@ struct Pending {
     username: String,
     alias: String,
     server: String,
-    archive_key: ArchiveKey,
 }
 
 struct Actor {
@@ -549,18 +576,20 @@ struct Actor {
     pending: Option<Pending>,
     session: Option<Session>,
     events: Option<mpsc::Sender<ClientEvent>>,
-    /// Key protecting the history archive; absent until the user provides
-    /// their recovery key on this device.
-    archive_key: Option<ArchiveKey>,
     /// When we last rebuilt the session with each contact, so a backlog of
     /// unreadable messages does not trigger one repair per message.
     repairs: std::collections::HashMap<String, i64>,
+    /// Contacts whose published identity does not match the one we pinned,
+    /// and which key they are offering. Nothing is sent to them until the
+    /// user has looked at it, and this stops the interface being asked the
+    /// same question once per message.
+    disputed: std::collections::HashMap<String, String>,
 }
 
 /// How long to wait before rebuilding the session with the same contact again.
 const REPAIR_INTERVAL_MS: i64 = 60_000;
-/// Devices an account may have, matching the server's own limit.
-const MAX_DEVICES: u32 = 4;
+/// An account has one device, and it is this one.
+const THE_DEVICE: u32 = 1;
 
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -581,11 +610,7 @@ impl Actor {
         // A new account means a clean slate on this device.
         self.db.clear_all()?;
         self.session = None;
-        self.archive_key = None;
-        // The history key is random, never derived from anything the user
-        // typed, and shown to them later as a recovery code.
-        let archive_key = ArchiveKey::generate();
-        let engine = Engine::open(self.db.clone(), username, 1)?;
+        let engine = Engine::open(self.db.clone(), username, THE_DEVICE)?;
         let mut api = ApiClient::new(server.trim_end_matches('/'));
         let dev_code = api
             .register(
@@ -603,7 +628,6 @@ impl Actor {
             username: username.to_string(),
             alias: alias.to_string(),
             server: server.trim_end_matches('/').to_string(),
-            archive_key,
         });
         Ok(dev_code)
     }
@@ -623,9 +647,6 @@ impl Actor {
             server: pending.server,
             token: pending.api.token().unwrap_or_default().to_string(),
         })?;
-        self.db
-            .meta_set("archive_key", &pending.archive_key.to_b64())?;
-        self.archive_key = Some(pending.archive_key);
         self.session = Some(Session {
             engine: pending.engine,
             api: pending.api,
@@ -633,80 +654,71 @@ impl Actor {
         Ok(())
     }
 
-    /// Re-encrypts a message under the history key and uploads it. Best
-    /// effort: a failure here must never break sending or receiving.
-    async fn archive_message(&self, msg: &StoredMessage) {
-        if Self::is_control(&msg.kind) {
-            return;
-        }
-        let (Some(key), Some(session)) = (self.archive_key.as_ref(), self.session.as_ref()) else {
-            return;
-        };
-        let blob = match key.encrypt_entry(&ArchiveEntry::from(msg)) {
-            Ok(blob) => blob,
-            Err(e) => {
-                tracing::warn!("cannot encrypt history entry: {e}");
-                return;
+    /// Packs every conversation on this device into an encrypted file.
+    ///
+    /// The server keeps no history, so this is the only way conversations
+    /// move to another device — and the only thing standing between the file
+    /// and whoever picks it up is the password, which is why the packing is
+    /// deliberately slow. See [`crate::transfer`].
+    fn export_conversations(&self, password: &str) -> anyhow::Result<Vec<u8>> {
+        let messages: Vec<ExportedMessage> = self
+            .db
+            .all_messages()?
+            .iter()
+            .filter(|m| !Self::is_control(&m.kind))
+            .map(ExportedMessage::from)
+            .collect();
+        let contacts: Vec<ExportedContact> = self
+            .db
+            .contacts()?
+            .into_iter()
+            .map(|(username, alias, _)| ExportedContact {
+                avatar: self.db.contact_avatar(&username).unwrap_or(None),
+                username,
+                alias,
+            })
+            .collect();
+        let username = self.db.profile()?.map(|p| p.username).unwrap_or_default();
+
+        tracing::info!("exporting {} messages", messages.len());
+        crate::transfer::export(
+            &Export {
+                username,
+                exported_at: now_ms(),
+                messages,
+                contacts,
+            },
+            password,
+        )
+    }
+
+    /// Merges an exported file into this device, returning how many messages
+    /// were new. Anything already here is left alone: the local copy knows
+    /// its own delivery state, and the file is a snapshot of an older one.
+    fn import_conversations(&self, bytes: &[u8], password: &str) -> anyhow::Result<usize> {
+        let opened = crate::transfer::import(bytes, password)?;
+        let before = self.db.all_messages()?.len();
+        for message in opened.messages {
+            let stored = StoredMessage::from(message);
+            if let Err(e) = self.db.add_message(&stored) {
+                tracing::warn!("cannot store an imported message: {e}");
             }
-        };
-        if let Err(e) = session.api.put_archive(&msg.id, &blob).await {
-            tracing::warn!("cannot upload history entry: {e}");
         }
+        // Pictures and names travel too, so an import on a device that has
+        // never spoken to these people still shows something recognisable.
+        for contact in opened.contacts {
+            if let Some(avatar) = contact.avatar.as_deref().filter(|a| is_picture(a)) {
+                let _ = self.db.set_contact_avatar(&contact.username, Some(avatar));
+            }
+        }
+        let added = self.db.all_messages()?.len().saturating_sub(before);
+        tracing::info!("imported {added} new messages");
+        Ok(added)
     }
 
     /// Adopts `code` as the history key: pulls the archive down, merges it
     /// into the local database, and re-uploads anything this device had
     /// archived under its previous key so nothing is orphaned.
-    async fn handle_restore(&mut self, code: &str) -> anyhow::Result<usize> {
-        let key = ArchiveKey::from_recovery_code(code)?;
-        let restored = self.restore_archive(&key).await?;
-        self.db.meta_set("archive_key", &key.to_b64())?;
-        self.archive_key = Some(key);
-        // Back-fill: anything this device holds but never archived (because
-        // it had no key) goes up now.
-        for msg in self.db.all_messages()? {
-            self.archive_message(&msg).await;
-        }
-        Ok(restored)
-    }
-
-    /// Downloads the encrypted archive and merges it into the local database.
-    /// Returns how many messages were restored.
-    async fn restore_archive(&self, key: &ArchiveKey) -> anyhow::Result<usize> {
-        let session = self
-            .session
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("no session"))?;
-        let entries = session.api.list_archive().await?;
-        let mut restored = 0;
-        let mut failed = 0;
-        for (_, blob) in &entries {
-            match key.decrypt_entry(blob) {
-                Ok(entry) => {
-                    let msg = StoredMessage::from(entry);
-                    // Control messages were archived by versions that treated
-                    // them as ordinary ones; drop them here and clean up.
-                    if Self::is_control(&msg.kind) {
-                        let _ = session.api.delete_archive_entry(&msg.id).await;
-                        continue;
-                    }
-                    // Remember the contact too, so restored chats are listed.
-                    let _ = self.db.upsert_contact(&msg.contact, &msg.contact, "accepted");
-                    if self.db.add_message(&msg).is_ok() {
-                        restored += 1;
-                    }
-                }
-                Err(_) => failed += 1,
-            }
-        }
-        // All entries failing means the key is wrong, not that data is bad.
-        if restored == 0 && failed > 0 {
-            anyhow::bail!("wrong_recovery_key");
-        }
-        tracing::info!("restored {restored} archived messages ({failed} unreadable)");
-        Ok(restored)
-    }
-
     async fn handle_login(
         &mut self,
         server: &str,
@@ -722,18 +734,13 @@ impl Actor {
             // Different account (or first login on this device): clean slate.
             self.db.clear_all()?;
             self.session = None;
-            self.archive_key = None;
         }
 
-        // A device that already belongs to this account keeps its number, its
-        // queue and its sessions; anything else joins as a new one.
-        let known_device = if same_account { self.db.device_id()? } else { None };
+        // Signing in here signs out wherever the account was before: it is one
+        // device at a time, and this is now the one.
         let mut api = ApiClient::new(server);
-        let device = api
-            .login(username, password, known_device, &device_name())
-            .await?;
-        self.db.set_device_id(device)?;
-        let mut engine = Engine::open(self.db.clone(), username, device as u32)?;
+        api.login(username, password, &device_name()).await?;
+        let mut engine = Engine::open(self.db.clone(), username, THE_DEVICE)?;
 
         if !same_account {
             // Fresh keys for this device; publishing them also updates our
@@ -751,19 +758,6 @@ impl Actor {
         };
         self.db.save_profile(&profile)?;
         self.session = Some(Session { engine, api });
-
-        // The recovery key belongs to the *account*, not the device: it is
-        // created once at registration. A device that doesn't hold it yet
-        // archives nothing, because entries written under a second key would
-        // be unreadable with the key the user actually kept. Restoring with
-        // the real code adopts it and back-fills anything received meanwhile.
-        self.archive_key = match self.db.meta_get("archive_key")? {
-            Some(stored) => Some(ArchiveKey::from_b64(&stored)?),
-            None => {
-                tracing::info!("no recovery key on this device; history archiving is paused");
-                None
-            }
-        };
 
         Ok(ProfileInfo {
             username: profile.username,
@@ -783,16 +777,10 @@ impl Actor {
             .profile()?
             .ok_or_else(|| anyhow::anyhow!("no account on this device"))?;
         if self.session.is_none() {
-            let device = self.db.device_id()?.unwrap_or(1);
-            let engine = Engine::open(self.db.clone(), &profile.username, device as u32)?;
+            let engine = Engine::open(self.db.clone(), &profile.username, THE_DEVICE)?;
             let mut api = ApiClient::new(&profile.server);
             api.set_token(&profile.token);
             self.session = Some(Session { engine, api });
-        }
-        if self.archive_key.is_none() {
-            if let Some(stored) = self.db.meta_get("archive_key")? {
-                self.archive_key = ArchiveKey::from_b64(&stored).ok();
-            }
         }
         // Re-assert the chosen presence: the server only reports it while a
         // stream is open, so it must be refreshed on every reconnect.
@@ -822,6 +810,14 @@ impl Actor {
     ///
     /// The message that triggered this is still lost: it was encrypted for a
     /// ratchet that no longer exists.
+    ///
+    /// Only the ratchet is dropped. The contact's pinned identity survives,
+    /// which matters more than it looks: an unreadable message is something
+    /// anyone relaying for us can produce at will, and if that were enough to
+    /// forget who the contact is, the next bundle would be trusted on sight
+    /// and the relay would have chosen when to be believed. Rebuilding under
+    /// the same identity needs nothing more than this; a genuinely new key
+    /// goes to the user instead, through [`Self::dispute`].
     async fn repair_session(&mut self, peer: &str) {
         let now = now_ms();
         if let Some(last) = self.repairs.get(peer) {
@@ -834,19 +830,31 @@ impl Actor {
         self.repairs.insert(peer.to_string(), now);
 
         if let Some(session) = self.session.as_mut() {
-            // Every device of theirs: we cannot tell which one we can no
-            // longer read, and rebuilding all of them is harmless.
-            for device in 1..=MAX_DEVICES {
-                if let Err(e) = session.engine.reset_session(peer, device) {
-                    tracing::warn!("cannot drop the stale session with {peer}/{device}: {e}");
-                    return;
-                }
+            if let Err(e) = session.engine.reset_session(peer, THE_DEVICE) {
+                tracing::warn!("cannot drop the stale session with {peer}: {e}");
+                return;
             }
         }
         tracing::info!("rebuilding the session with {peer} after an unreadable message");
         if let Err(e) = self.handle_send(peer, "rekey", "").await {
             tracing::warn!("cannot rebuild the session with {peer}: {e}");
         }
+    }
+
+    /// Accepts the key a contact is now publishing, after the user confirmed
+    /// the change was really them. Everything held for the old key goes, and
+    /// the next message negotiates afresh.
+    async fn accept_identity(&mut self, contact: &str) -> anyhow::Result<()> {
+        self.disputed.remove(contact);
+        if let Some(session) = self.session.as_mut() {
+            session.engine.forget_identity(contact, THE_DEVICE)?;
+        }
+        tracing::warn!("the user accepted a new identity key for {contact}");
+        // Nudge the conversation back to life under the new key.
+        if let Err(e) = self.handle_send(contact, "rekey", "").await {
+            tracing::warn!("cannot rebuild the session with {contact}: {e}");
+        }
+        Ok(())
     }
 
     /// Encrypts and sends, returning the id the server assigned. Whether the
@@ -864,53 +872,104 @@ impl Actor {
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("no session; log in first"))?;
 
-        let remote = session.api.fetch_profile(recipient).await?;
-        let envelopes = Self::encrypt_for_devices(session, recipient, &payload).await?;
-        let id = session.api.send_message(recipient, &envelopes).await?;
-        self.db.upsert_contact(recipient, &remote.alias, "accepted")?;
-
-        // Our own other devices show the same conversation, so they get a copy
-        // of what we just wrote, encrypted for each of them in turn.
-        let me = session.engine.username().to_string();
-        let sync = encode_content("sync", &encode_sync(recipient, kind, content));
-        if let Ok(copies) = Self::encrypt_for_devices(session, &me, &sync).await {
-            if !copies.is_empty() {
-                if let Err(e) = session.api.send_message(&me, &copies).await {
-                    tracing::warn!("cannot mirror the message to our own devices: {e}");
-                }
-            }
+        // Refused outright while the contact's key is in dispute: sending
+        // would mean encrypting to whoever holds the new one.
+        if self.disputed.contains_key(recipient) {
+            anyhow::bail!("identity_changed");
         }
+
+        let remote = session.api.fetch_profile(recipient).await?;
+        let envelope = Self::encrypt_for(session, recipient, &payload).await;
+        let envelope = match envelope {
+            Ok(envelope) => envelope,
+            Err(SendRefused::IdentityChanged { known, published }) => {
+                self.dispute(recipient, &known, &published).await;
+                anyhow::bail!("identity_changed");
+            }
+            Err(SendRefused::Other(e)) => return Err(e),
+        };
+        let id = session.api.send_message(recipient, &envelope).await?;
+        self.db.upsert_contact(recipient, &remote.alias, "accepted")?;
         Ok(id)
     }
 
-    /// Encrypts `payload` once per device of `peer`, establishing sessions and
-    /// renegotiating any device whose identity changed.
-    async fn encrypt_for_devices(
+    /// Why a message could not be encrypted for its recipient.
+    async fn dispute(&mut self, contact: &str, known: &str, published: &str) {
+        if self
+            .disputed
+            .insert(contact.to_string(), published.to_string())
+            .as_deref()
+            == Some(published)
+        {
+            // Already asked about this exact key; asking again per message
+            // would bury the question under its own repetitions.
+            return;
+        }
+        tracing::warn!("the identity key of {contact} changed; waiting for the user to decide");
+        if let Some(events) = &self.events {
+            let _ = events
+                .send(ClientEvent::IdentityChanged {
+                    contact: contact.to_string(),
+                    known: Engine::fingerprint(known),
+                    published: Engine::fingerprint(published),
+                })
+                .await;
+        }
+    }
+
+    /// Encrypts `payload` for `peer`, establishing the session if there is
+    /// none yet.
+    ///
+    /// A bundle whose identity key is not the one we pinned stops here. It may
+    /// be an honest reinstall, or it may be the server handing us a key of its
+    /// own so that it can read what we send next; nothing in the bundle can
+    /// tell the two apart, and only the person using the app can. Adopting it
+    /// quietly — which is what this used to do — meant the server could arrange
+    /// to be trusted whenever it liked.
+    async fn encrypt_for(
         session: &mut Session,
         peer: &str,
         payload: &[u8],
-    ) -> anyhow::Result<Vec<(i64, String)>> {
-        let bundles = session.api.fetch_bundles(peer).await?;
-        let mut envelopes = Vec::new();
-        for (device, bundle) in bundles {
-            let device_u32 = device as u32;
-            // A device that re-provisioned its keys publishes a new identity;
-            // the session we hold for it is then unusable.
-            if let (Some(known), Some(published)) = (
-                session.engine.known_identity_b64(peer, device_u32).await?,
-                bundle["identity_key"].as_str(),
-            ) {
-                if !published.is_empty() && known != published {
-                    tracing::info!("identity of {peer}/{device} changed; renegotiating");
-                    session.engine.reset_session(peer, device_u32)?;
-                }
+    ) -> Result<String, SendRefused> {
+        let bundle = session
+            .api
+            .fetch_bundle(peer)
+            .await
+            .map_err(SendRefused::Other)?;
+
+        if let (Some(known), Some(published)) = (
+            session
+                .engine
+                .known_identity_b64(peer, THE_DEVICE)
+                .await
+                .map_err(SendRefused::Other)?,
+            bundle["identity_key"].as_str(),
+        ) {
+            if !published.is_empty() && known != published {
+                return Err(SendRefused::IdentityChanged {
+                    known,
+                    published: published.to_string(),
+                });
             }
-            if !session.engine.has_session(peer, device_u32).await? {
-                session.engine.ensure_session(peer, device_u32, &bundle).await?;
-            }
-            envelopes.push((device, session.engine.encrypt(peer, device_u32, payload).await?));
         }
-        Ok(envelopes)
+
+        if !session
+            .engine
+            .has_session(peer, THE_DEVICE)
+            .await
+            .map_err(SendRefused::Other)?
+        {
+            session
+                .engine
+                .ensure_session(peer, THE_DEVICE, &bundle)
+                .await
+                .map_err(SendRefused::Other)?;
+        }
+        session
+            .engine
+            .encrypt(peer, THE_DEVICE, payload)
+            .await
+            .map_err(SendRefused::Other)
     }
 
     async fn handle_send(
@@ -966,9 +1025,6 @@ impl Actor {
                         tracing::warn!("cannot follow the resent message: {e}");
                         continue;
                     }
-                    if let Some(session) = self.session.as_ref() {
-                        let _ = session.api.delete_archive_entry(&msg.id).await;
-                    }
                     if let Some(events) = &self.events {
                         let _ = events
                             .send(ClientEvent::MessageResent {
@@ -978,7 +1034,6 @@ impl Actor {
                             .await;
                     }
                     msg.id = id;
-                    self.archive_message(&msg).await;
                 }
                 Err(e) => {
                     // The session is broken again, or the server is gone;
@@ -1014,9 +1069,6 @@ impl Actor {
 
         for message in &history {
             let _ = self.db.delete_message(&message.id);
-            if let Some(session) = self.session.as_ref() {
-                let _ = session.api.delete_archive_entry(&message.id).await;
-            }
         }
         tracing::info!("deleted {} messages of the conversation with {contact}", history.len());
         Ok(history.len())
@@ -1065,12 +1117,6 @@ impl Actor {
         }
 
         self.db.delete_message(id)?;
-        // Drop it from our archive too, or restoring history would bring it
-        // back on the next device.
-        if let Some(session) = self.session.as_ref() {
-            let _ = session.api.delete_archive_entry(id).await;
-        }
-
         if for_everyone {
             self.handle_send(&contact, "delete", id).await?;
         }
@@ -1167,44 +1213,7 @@ impl Actor {
             .map_err(|e| e.to_string())
     }
 
-    /// Files a message another of our devices sent, so every device shows the
-    /// same conversation. It is ours, and already on its way, so it carries
-    /// the same id and the same "sent" state as on the device that wrote it.
-    fn store_own_copy(&mut self, msg: &IncomingMessage, content: &str) -> Option<StoredMessage> {
-        let (to, kind, text) = decode_sync(content)?;
-        if Self::is_control(&kind) {
-            return None;
-        }
-        let stored = StoredMessage {
-            id: msg.id.clone(),
-            contact: to,
-            mine: true,
-            kind,
-            text,
-            state: "sent".to_string(),
-            delivered_at: None,
-            read_at: None,
-            created_at: msg.created_at,
-        };
-        if let Err(e) = self.db.add_message(&stored) {
-            tracing::warn!("cannot store our own message from another device: {e}");
-            return None;
-        }
-        if let Some(events) = &self.events {
-            let _ = events.try_send(ClientEvent::OwnMessage(DecryptedMessage {
-                id: stored.id.clone(),
-                sender: stored.contact.clone(),
-                kind: stored.kind.clone(),
-                text: stored.text.clone(),
-                created_at: stored.created_at,
-            }));
-        }
-        // Archived by the device that sent it; a second copy would be the same
-        // entry under the same id.
-        None
-    }
-
-    /// Returns the stored message so the caller can archive it once the
+    /// Returns the stored message so the caller can act on it once the
     /// session borrow is released.
     async fn handle_incoming(&mut self, msg: IncomingMessage) -> Option<StoredMessage> {
         let session = self.session.as_mut()?;
@@ -1213,12 +1222,6 @@ impl Actor {
             Ok(plain) => {
                 let _ = session.api.ack_message(&msg.id).await;
                 let (kind, text) = decode_content(&plain);
-
-                // A copy of something we wrote on another device: it belongs
-                // in that conversation, on our side of it.
-                if kind == "sync" {
-                    return self.store_own_copy(&msg, &text);
-                }
 
                 // Decrypting it already adopted the sender's new session, so
                 // what we send next is readable on their side — including
@@ -1234,7 +1237,20 @@ impl Actor {
                 // message does and never passes through the server in the
                 // clear.
                 if kind == "avatar" {
-                    let avatar = (!text.is_empty()).then_some(text.as_str());
+                    // Only an inline image. The interface hands this to an
+                    // <img>, so anything pointing elsewhere would be fetched
+                    // from there — see `is_picture`.
+                    let avatar = match text.as_str() {
+                        "" => None,
+                        picture if is_picture(picture) => Some(picture),
+                        _ => {
+                            tracing::warn!(
+                                "{} sent something that is not an inline picture; ignored",
+                                msg.sender
+                            );
+                            return None;
+                        }
+                    };
                     if let Err(e) = self.db.set_contact_avatar(&msg.sender, avatar) {
                         tracing::warn!("cannot store the picture of {}: {e}", msg.sender);
                     }
@@ -1248,9 +1264,6 @@ impl Actor {
                 // deleted a message and wants our copy gone too.
                 if kind == "delete" {
                     let _ = self.db.delete_message(&text);
-                    if let Some(session) = self.session.as_ref() {
-                        let _ = session.api.delete_archive_entry(&text).await;
-                    }
                     if let Some(events) = &self.events {
                         let _ = events
                             .send(ClientEvent::MessageDeleted { id: text })
@@ -1316,7 +1329,32 @@ impl Actor {
                 // redelivered forever, but telling the sender it arrived would
                 // also stop them from sending it again once we can read them.
                 let _ = session.api.discard_message(&msg.id).await;
-                self.repair_session(&msg.sender).await;
+
+                // Two very different things look the same from here: a ratchet
+                // one of us lost, or somebody else holding the other end. The
+                // published key tells them apart, and only the first is ours
+                // to fix — rebuilding on a key we never agreed to would be
+                // adopting whoever sent this.
+                let sender = msg.sender.clone();
+                let published = session
+                    .api
+                    .fetch_profile(&sender)
+                    .await
+                    .ok()
+                    .map(|p| p.identity_key);
+                let known = session
+                    .engine
+                    .known_identity_b64(&sender, THE_DEVICE)
+                    .await
+                    .ok()
+                    .flatten();
+                if let (Some(known), Some(published)) = (known, published) {
+                    if !published.is_empty() && known != published {
+                        self.dispute(&sender, &known, &published).await;
+                        return None;
+                    }
+                }
+                self.repair_session(&sender).await;
                 None
             }
         }
@@ -1334,8 +1372,6 @@ async fn report_fatal(mut commands: mpsc::Receiver<Command>, reason: String) {
             Command::Login { reply, .. } => drop(reply.send(Err(reason.clone()))),
             Command::ForgotPassword { reply, .. } => drop(reply.send(Err(reason.clone()))),
             Command::ResetPassword { reply, .. } => drop(reply.send(Err(reason.clone()))),
-            Command::RecoveryCode { reply } => drop(reply.send(Err(reason.clone()))),
-            Command::RestoreHistory { reply, .. } => drop(reply.send(Err(reason.clone()))),
             Command::Connect { reply } => drop(reply.send(Err(reason.clone()))),
             Command::Send { reply, .. } => drop(reply.send(Err(reason.clone()))),
             Command::RequestContact { reply, .. } => drop(reply.send(Err(reason.clone()))),
@@ -1346,8 +1382,9 @@ async fn report_fatal(mut commands: mpsc::Receiver<Command>, reason: String) {
             Command::Contacts { reply } => drop(reply.send(Err(reason.clone()))),
             Command::DeleteConversation { reply, .. } => drop(reply.send(Err(reason.clone()))),
             Command::SetAvatar { reply, .. } => drop(reply.send(Err(reason.clone()))),
-            Command::Devices { reply } => drop(reply.send(Err(reason.clone()))),
-            Command::RevokeDevice { reply, .. } => drop(reply.send(Err(reason.clone()))),
+            Command::ExportConversations { reply, .. } => drop(reply.send(Err(reason.clone()))),
+            Command::ImportConversations { reply, .. } => drop(reply.send(Err(reason.clone()))),
+            Command::AcceptIdentity { reply, .. } => drop(reply.send(Err(reason.clone()))),
             Command::History { reply, .. } => drop(reply.send(Err(reason.clone()))),
             Command::MarkRead { reply, .. } => drop(reply.send(Err(reason.clone()))),
             Command::UpdateMe { reply, .. } => drop(reply.send(Err(reason.clone()))),
@@ -1373,8 +1410,8 @@ async fn actor(db_path: PathBuf, mut commands: mpsc::Receiver<Command>) {
         pending: None,
         session: None,
         events: None,
-        archive_key: None,
         repairs: std::collections::HashMap::new(),
+        disputed: std::collections::HashMap::new(),
     };
     let mut stream: Option<mpsc::Receiver<ServerEvent>> = None;
 
@@ -1427,16 +1464,16 @@ async fn actor(db_path: PathBuf, mut commands: mpsc::Receiver<Command>) {
                         .map_err(|e| e.to_string());
                     let _ = reply.send(result);
                 }
-                Some(Command::RecoveryCode { reply }) => {
-                    let result = actor
-                        .archive_key
-                        .as_ref()
-                        .map(|k| k.to_recovery_code())
-                        .ok_or_else(|| "no_recovery_key".to_string());
-                    let _ = reply.send(result);
+                Some(Command::ExportConversations { password, reply }) => {
+                    let result = actor.export_conversations(&password);
+                    let _ = reply.send(result.map_err(|e| e.to_string()));
                 }
-                Some(Command::RestoreHistory { code, reply }) => {
-                    let result = actor.handle_restore(&code).await;
+                Some(Command::ImportConversations { bytes, password, reply }) => {
+                    let result = actor.import_conversations(&bytes, &password);
+                    let _ = reply.send(result.map_err(|e| e.to_string()));
+                }
+                Some(Command::AcceptIdentity { contact, reply }) => {
+                    let result = actor.accept_identity(&contact.to_lowercase()).await;
                     let _ = reply.send(result.map_err(|e| e.to_string()));
                 }
                 Some(Command::Connect { reply }) => {
@@ -1456,9 +1493,6 @@ async fn actor(db_path: PathBuf, mut commands: mpsc::Receiver<Command>) {
                     let result = actor
                         .handle_send(&recipient.to_lowercase(), &kind, &content)
                         .await;
-                    if let Ok(stored) = &result {
-                        actor.archive_message(stored).await;
-                    }
                     let _ = reply.send(result.map_err(|e| e.to_string()));
                 }
                 Some(Command::RequestContact { username, reply }) => {
@@ -1530,20 +1564,6 @@ async fn actor(db_path: PathBuf, mut commands: mpsc::Receiver<Command>) {
                     let result = actor.handle_set_avatar(avatar).await;
                     let _ = reply.send(result.map_err(|e| e.to_string()));
                 }
-                Some(Command::Devices { reply }) => {
-                    let result = match actor.session.as_ref() {
-                        None => Err("no_session".to_string()),
-                        Some(s) => s.api.list_devices().await.map_err(|e| e.to_string()),
-                    };
-                    let _ = reply.send(result);
-                }
-                Some(Command::RevokeDevice { device, reply }) => {
-                    let result = match actor.session.as_ref() {
-                        None => Err("no_session".to_string()),
-                        Some(s) => s.api.revoke_device(device).await.map_err(|e| e.to_string()),
-                    };
-                    let _ = reply.send(result);
-                }
                 Some(Command::History { contact, reply }) => {
                     let _ = reply.send(actor.db.history(&contact).map_err(|e| e.to_string()));
                 }
@@ -1575,9 +1595,7 @@ async fn actor(db_path: PathBuf, mut commands: mpsc::Receiver<Command>) {
             event = async { stream.as_mut().expect("guarded by if").recv().await }, if stream.is_some() => {
                 match event {
                     Some(ServerEvent::Message(msg)) => {
-                        if let Some(stored) = actor.handle_incoming(msg).await {
-                            actor.archive_message(&stored).await;
-                        }
+                        actor.handle_incoming(msg).await;
                     }
                     Some(ServerEvent::ContactsChanged) => {
                         if let Some((_, newly_accepted)) = actor.sync_contacts().await {

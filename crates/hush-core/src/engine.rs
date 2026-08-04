@@ -99,6 +99,7 @@ impl Engine {
         Ok(B64.encode(pair.public_key().serialize()))
     }
 
+
     /// Generates a fresh signed prekey, last-resort kyber prekey and `n`
     /// one-time prekeys of each kind; stores the private halves locally and
     /// returns the JSON body for `PUT /v1/keys`.
@@ -182,6 +183,26 @@ impl Engine {
         Ok(self.sessions.load_session(&addr).await?.is_some())
     }
 
+    /// A short, readable fingerprint of an identity key.
+    ///
+    /// Shown when a contact's key changes, so the two of you can read it to
+    /// each other over some channel this app does not control and settle
+    /// whether the change was really them. Without that, accepting a new key
+    /// is trusting whatever the server said.
+    pub fn fingerprint(identity_b64: &str) -> String {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(identity_b64.as_bytes());
+        digest
+            .iter()
+            .take(10)
+            .map(|b| format!("{b:02X}"))
+            .collect::<Vec<_>>()
+            .chunks(2)
+            .map(|pair| pair.concat())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     /// The identity key we have on record for `remote`, if any (base64).
     pub async fn known_identity_b64(&self, remote: &str, device: u32) -> Result<Option<String>> {
         let addr = ProtocolAddress::new(remote.to_string(), device_id(device));
@@ -194,7 +215,29 @@ impl Engine {
 
     /// Drops the session and recorded identity for `remote` (e.g. after the
     /// contact re-provisioned their keys on a new device).
+    /// Throws away the ratchet with `remote`, so the next message rebuilds it.
+    ///
+    /// The pinned identity deliberately stays. Losing a ratchet is ordinary —
+    /// a reinstall, a message that arrived for a session we no longer have —
+    /// and rebuilding it needs nothing more than this. Forgetting *who* the
+    /// contact is at the same time would mean the next bundle the server
+    /// hands over is trusted on sight, whoever it belongs to, and the server
+    /// gets to decide when that happens by sending one unreadable message.
+    /// That is [`forget_identity`](Self::forget_identity), and only the user
+    /// may ask for it.
     pub fn reset_session(&mut self, remote: &str, device: u32) -> Result<()> {
+        let addr = ProtocolAddress::new(remote.to_string(), device_id(device));
+        let key = format!("{}:{}", addr.name(), u32::from(addr.device_id()));
+        self.db
+            .with(|c| c.execute("DELETE FROM sessions WHERE address = ?1", [&key]).map(|_| ()))
+    }
+
+    /// Un-pins the identity of `remote`, accepting whatever they publish next.
+    ///
+    /// Only ever called after the person using the app has been shown that the
+    /// contact's key changed and has said to go ahead: from here on, messages
+    /// go to whoever holds the new key.
+    pub fn forget_identity(&mut self, remote: &str, device: u32) -> Result<()> {
         let addr = ProtocolAddress::new(remote.to_string(), device_id(device));
         let key = format!("{}:{}", addr.name(), u32::from(addr.device_id()));
         self.db.with(|c| {

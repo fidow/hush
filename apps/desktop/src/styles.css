@@ -488,12 +488,20 @@ button.mini {
   white-space: nowrap;
 }
 
-/* The back button only means anything where the panes take turns. */
+/* The back button only means anything where the panes take turns — which is
+   to say on a phone, where it is hit with a thumb rather than pointed at.
+   The glyph is small, so the button is sized to the 48dp Android expects a
+   target to be and the arrow is centred inside it. */
 #conv-back {
   display: none;
-  font-size: 1.6rem;
-  padding: 0 0.6rem;
+  font-size: 1.7rem;
   line-height: 1;
+  margin-left: 0;
+  padding: 0;
+  min-width: 3rem;
+  min-height: 3rem;
+  align-items: center;
+  justify-content: center;
 }
 
 /* A phone, or a very narrow window: one pane at a time, the contact list
@@ -510,7 +518,7 @@ button.mini {
   }
 
   #conv-back {
-    display: block;
+    display: flex;
   }
 
   .bubble {
@@ -578,30 +586,6 @@ button.mini {
   line-height: 1.35;
   user-select: text;
   overflow-wrap: anywhere;
-}
-
-.device-list {
-  list-style: none;
-  display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
-  margin: 0 0 0.8rem;
-  padding: 0;
-}
-
-.device-list li {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.8rem;
-  padding: 0.5rem 0.7rem;
-  border-radius: 10px;
-  background: var(--panel);
-}
-
-.device-list small {
-  display: block;
-  color: var(--muted);
 }
 
 /* Time and ticks sit together at the bottom right of the bubble. Muted by
@@ -886,44 +870,31 @@ label.toggle input {
   user-select: text;
 }
 
-.recovery-row {
+.transfer-row {
   display: flex;
   gap: 0.5rem;
   align-items: center;
 }
 
-.recovery-row input {
+.transfer-row button {
   flex: 1;
-  min-width: 0;
-  font-family: ui-monospace, Consolas, monospace;
-  font-size: 0.85rem;
 }
 
-.recovery-code {
-  display: flex;
-  align-items: center;
-  justify-content: center;
+/* A key fingerprint, meant to be read out loud to the other person, so the
+   groups have to be easy to keep your place in. */
+.fingerprint {
+  display: block;
   text-align: center;
   background: var(--panel-2);
   border: 1px solid var(--border);
   border-radius: 8px;
-  padding: 0.7rem;
+  padding: 0.6rem;
   font-family: ui-monospace, Consolas, monospace;
-  font-size: 0.92rem;
-  letter-spacing: 0.04em;
+  font-size: 0.95rem;
+  letter-spacing: 0.08em;
   line-height: 1.5;
   overflow-wrap: anywhere;
   user-select: text;
-  /* Reserve the room the full key needs so revealing it does not resize
-     the dialog. */
-  min-height: 4.6rem;
-}
-
-.recovery-code.recovery-missing {
-  font-family: inherit;
-  font-size: 0.85rem;
-  letter-spacing: normal;
-  color: var(--muted);
 }
 
 .icon-btn {

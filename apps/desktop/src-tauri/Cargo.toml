@@ -25,6 +25,11 @@ serde.workspace = true
 serde_json.workspace = true
 tauri-plugin-updater = "2.10.1"
 tauri-plugin-process = "2.3.1"
+# Exporting and importing conversations. The picker and the file writing both
+# go through the plugins so Android works too, where "a file" is whatever its
+# document picker hands back rather than a path on disk.
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
 
 [target.'cfg(windows)'.dependencies]
 # Toasts are sent directly so they carry Hush's own app id: the notification
