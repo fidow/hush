@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The status bar icon. Android throws away the colours of these and keeps
+     only the shape, so this is the bubble as an outline with the padlock
+     solid inside it: recognisably Hush at the size of a status bar, which the
+     full colour icon is not. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="1024"
+    android:viewportHeight="1024">
+    <group
+        android:pivotX="512"
+        android:pivotY="500"
+        android:scaleX="1.42"
+        android:scaleY="1.42">
+        <path
+            android:fillColor="#00000000"
+            android:strokeColor="#FFFFFFFF"
+            android:strokeWidth="56"
+            android:pathData="M512,200 c-184,0 -312,118 -312,268 c0,88 46,163 118,211 c-6,44 -28,88 -64,122 c62,-6 122,-30 168,-64 c28,7 58,11 90,11 c184,0 312,-118 312,-280 s-128,-268 -312,-268 z" />
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:pathData="M512,340 c-52,0 -92,40 -92,92 v36 h44 v-36 c0,-27 21,-48 48,-48 s48,21 48,48 v36 h44 v-36 c0,-52 -40,-92 -92,-92 z" />
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:pathData="M438,462 h148 a34,34 0 0 1 34,34 v96 a34,34 0 0 1 -34,34 h-148 a34,34 0 0 1 -34,-34 v-96 a34,34 0 0 1 34,-34 z" />
+    </group>
+</vector>

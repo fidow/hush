@@ -328,6 +328,10 @@ function updateConversationPane() {
   pane.classList.toggle("no-chat", current === null);
   if (current !== null) return;
 
+  // Nobody is on screen, so neither is anybody's portrait.
+  $("#conv-portrait").classList.add("hidden");
+  $("#conv-title").textContent = t("chat.pickContact");
+
   const hasContacts = [...contacts.values()].some((c) => c.state === "accepted");
   $("#conv-empty-title").textContent = t(
     hasContacts ? "empty.pickTitle" : "empty.noContactsTitle",
@@ -380,10 +384,15 @@ function presenceLabel(contact: Contact | undefined): string {
 
 function updateHeader() {
   if (!current) return;
-  const header = $("#conv-header");
   const contact = contacts.get(current);
-  header.textContent = `🔒 ${contactLabel(current)} · @${current} · ${presenceLabel(contact)}`;
-  header.title =
+  // Their portrait, the same one the contact list shows.
+  const portrait = avatarElement(contact?.avatar, contactLabel(current));
+  portrait.id = "conv-portrait";
+  $("#conv-portrait").replaceWith(portrait);
+
+  const title = $("#conv-title");
+  title.textContent = `🔒 ${contactLabel(current)} · @${current} · ${presenceLabel(contact)}`;
+  $("#conv-header").title =
     contact?.status === "offline" && contact.lastSeen ? fullTime(contact.lastSeen) : "";
 }
 
@@ -561,9 +570,16 @@ for (const event of ["mousemove", "mousedown", "keydown", "wheel", "focus"]) {
   });
 }
 
+/// Your own portrait and presence, side by side with your name, so the picture
+/// is visible without opening settings.
 function renderMyStatus() {
-  $("#me-dot").className = `dot status-${myStatus}`;
-  $("#me-dot").title = t(`status.${myStatus}`);
+  const portrait = avatarElement(myAvatar, myAlias || me);
+  portrait.id = "me-portrait";
+  const dot = document.createElement("span");
+  dot.className = `dot status-${myStatus}`;
+  dot.title = t(`status.${myStatus}`);
+  portrait.appendChild(dot);
+  $("#me-portrait").replaceWith(portrait);
 }
 
 // ---- Sesión ----
@@ -969,6 +985,8 @@ function renderMyAvatar() {
   const portrait = avatarElement(myAvatar, myAlias || me);
   holder.append(...portrait.childNodes);
   $("#avatar-clear").classList.toggle("hidden", !myAvatar);
+  // The same picture sits beside your name in the sidebar.
+  renderMyStatus();
 }
 
 $("#avatar-pick").addEventListener("click", () => $("#avatar-file").click());
@@ -1179,6 +1197,8 @@ $("#settings-form").addEventListener("submit", async (e) => {
     });
     myAlias = alias;
     $("#me-alias").textContent = myAlias;
+    // Without a picture the portrait is the initial of this name.
+    renderMyStatus();
     $("#settings").classList.add("hidden");
     toast(t("settings.saved"));
   } catch (err) {

@@ -37,6 +37,14 @@ struct CloseToTray(Arc<AtomicBool>);
 /// announced from here, so the choice has to be readable from Rust.
 struct AlertMode(Arc<std::sync::Mutex<String>>);
 
+/// Hush's own status bar icon. Without it the plugin falls back to Android's
+/// generic information icon, which says nothing about who is calling.
+#[cfg(target_os = "android")]
+const NOTIFICATION_ICON: &str = "ic_notification";
+/// The accent Android paints around that icon.
+#[cfg(target_os = "android")]
+const NOTIFICATION_COLOR: &str = "#584BC2";
+
 /// The Android notification channel for that choice. Channels carry the sound
 /// and vibration, and Android silences them itself when the phone is on
 /// silent, which a tone played by the app would not respect.
@@ -202,6 +210,8 @@ async fn connect(
                             .builder()
                             .title(&msg.sender)
                             .body(preview)
+                            .icon(NOTIFICATION_ICON)
+                            .icon_color(NOTIFICATION_COLOR)
                             .channel_id(alert_channel(&mode))
                             .show();
                     }
@@ -450,6 +460,8 @@ fn notify(app: tauri::AppHandle, title: String, body: String) -> Result<(), Stri
             .builder()
             .title(title)
             .body(body)
+            .icon(NOTIFICATION_ICON)
+            .icon_color(NOTIFICATION_COLOR)
             .channel_id(alert_channel(&mode))
             .show()
             .map_err(|e| e.to_string())

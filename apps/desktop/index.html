@@ -128,7 +128,8 @@
       <aside class="sidebar">
         <header class="me">
           <button type="button" id="me-status-btn" class="me-status" data-i18n-title="settings.status">
-            <span id="me-dot" class="dot status-online"></span>
+            <!-- Your own portrait, with the presence dot riding on it. -->
+            <span id="me-portrait" class="avatar"></span>
             <div class="me-names">
               <span id="me-alias"></span>
               <small id="me-name"></small>
@@ -147,7 +148,10 @@
         <div class="conv-bar">
           <!-- Only shown on a narrow screen, where the two panes take turns. -->
           <button type="button" id="conv-back" class="icon-btn" data-i18n-title="chat.back">‹</button>
-          <header id="conv-header" data-i18n="chat.pickContact"></header>
+          <header id="conv-header">
+            <span id="conv-portrait" class="avatar hidden"></span>
+            <span id="conv-title" data-i18n="chat.pickContact"></span>
+          </header>
         </div>
 
         <!-- Visible only while no conversation is open. -->

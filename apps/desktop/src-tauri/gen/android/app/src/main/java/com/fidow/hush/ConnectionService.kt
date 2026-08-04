@@ -59,7 +59,7 @@ class ConnectionService : Service() {
     return Notification.Builder(this, CHANNEL_ID)
       .setContentTitle(getString(R.string.connection_title))
       .setContentText(getString(R.string.connection_text))
-      .setSmallIcon(android.R.drawable.stat_notify_chat)
+      .setSmallIcon(R.drawable.ic_notification)
       .setContentIntent(open)
       .setOngoing(true)
       .build()

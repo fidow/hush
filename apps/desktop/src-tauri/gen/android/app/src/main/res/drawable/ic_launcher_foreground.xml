@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The foreground layer of the adaptive icon: the bubble and padlock of
+     app-icon.svg, and nothing else. The layer it lives in is 108 units wide
+     but only the middle 72 survive the launcher's mask, so the artwork is
+     scaled to two thirds to end up the same size on screen as it is on the
+     desktop icon. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="1024"
+    android:viewportHeight="1024">
+    <group
+        android:pivotX="512"
+        android:pivotY="512"
+        android:scaleX="0.667"
+        android:scaleY="0.667">
+        <path
+            android:fillColor="#F4F2FF"
+            android:pathData="M512,200 c-184,0 -312,118 -312,268 c0,88 46,163 118,211 c-6,44 -28,88 -64,122 c62,-6 122,-30 168,-64 c28,7 58,11 90,11 c184,0 312,-118 312,-280 s-128,-268 -312,-268 z" />
+        <path
+            android:fillColor="#584BC2"
+            android:pathData="M512,340 c-52,0 -92,40 -92,92 v36 h44 v-36 c0,-27 21,-48 48,-48 s48,21 48,48 v36 h44 v-36 c0,-52 -40,-92 -92,-92 z" />
+        <path
+            android:fillColor="#584BC2"
+            android:pathData="M438,462 h148 a34,34 0 0 1 34,34 v96 a34,34 0 0 1 -34,34 h-148 a34,34 0 0 1 -34,-34 v-96 a34,34 0 0 1 34,-34 z" />
+        <path
+            android:fillColor="#F4F2FF"
+            android:pathData="M488,524 a24,24 0 1 0 48,0 a24,24 0 1 0 -48,0 z" />
+        <path
+            android:fillColor="#F4F2FF"
+            android:pathData="M500,524 h24 v40 a12,12 0 0 1 -24,0 z" />
+    </group>
+</vector>
