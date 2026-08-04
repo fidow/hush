@@ -32,13 +32,16 @@ pub enum ClientEvent {
     /// Either they reinstalled, or somebody is standing between us. Nothing
     /// is sent to them and nothing of theirs is read until the person using
     /// the app decides which it was, so this goes to the interface rather
-    /// than being resolved quietly.
+    /// than being resolved quietly. It is also written into the conversation,
+    /// under `id`, so it is still there once the dialog is gone.
     IdentityChanged {
+        id: String,
         contact: String,
         /// Fingerprints of the key we trusted and the one being offered, to
         /// be read out over some other channel and compared.
         known: String,
         published: String,
+        at: i64,
     },
 }
 
@@ -68,6 +71,10 @@ fn encode_content(kind: &str, content: &str) -> Vec<u8> {
         .to_string()
         .into_bytes()
 }
+
+/// The kind of a conversation entry that nobody wrote: a note that the
+/// contact's key changed, kept alongside the messages it sits between.
+pub const KEY_CHANGED: &str = "keychange";
 
 /// Largest profile picture we will accept from a contact, as a data URL.
 /// Generous for a portrait, small enough that a contact cannot use it to fill
@@ -165,6 +172,10 @@ enum Command {
     /// changed and said it was really them.
     AcceptIdentity {
         contact: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Ends the session, here and on the server. Conversations stay.
+    Logout {
         reply: oneshot::Sender<Result<(), String>>,
     },
     Connect {
@@ -420,6 +431,13 @@ impl HushClient {
         let contact = contact.to_string();
         self.request(|reply| Command::AcceptIdentity { contact, reply })
             .await
+    }
+
+    /// Ends the session. The conversations on this device stay where they
+    /// are: the server holds no copy, so wiping them would be destroying the
+    /// only one there is.
+    pub async fn logout(&self) -> Result<(), String> {
+        self.request(|reply| Command::Logout { reply }).await
     }
 
     /// Opens the message stream for the locally stored account. The returned
@@ -719,6 +737,29 @@ impl Actor {
     /// Adopts `code` as the history key: pulls the archive down, merges it
     /// into the local database, and re-uploads anything this device had
     /// archived under its previous key so nothing is orphaned.
+    /// Ends the session here and on the server.
+    ///
+    /// The conversations stay: the server keeps no copy of them, so deleting
+    /// them on the way out would be destroying the only one that exists —
+    /// that is what the export is for, and it is a separate decision.
+    async fn handle_logout(&mut self) -> anyhow::Result<()> {
+        if let Some(session) = self.session.as_ref() {
+            // Best effort: being unable to reach the server is not a reason
+            // to leave the user signed in on their own machine.
+            if let Err(e) = session.api.logout().await {
+                tracing::warn!("the server did not confirm the sign-out: {e}");
+            }
+        }
+        self.session = None;
+        self.events = None;
+        self.pending = None;
+        self.disputed.clear();
+        self.repairs.clear();
+        self.db.forget_token()?;
+        tracing::info!("signed out");
+        Ok(())
+    }
+
     async fn handle_login(
         &mut self,
         server: &str,
@@ -726,10 +767,13 @@ impl Actor {
         password: &str,
     ) -> anyhow::Result<ProfileInfo> {
         let server = server.trim_end_matches('/');
+        // Whether this device already belongs to the account, which is not
+        // the same as it holding a session: signing out drops the token but
+        // keeps the conversations, and signing back in must find them.
         let same_account = self
             .db
-            .profile()?
-            .is_some_and(|p| p.username == username && p.server == server);
+            .account()?
+            .is_some_and(|(user, host)| user == username && host == server);
         if !same_account {
             // Different account (or first login on this device): clean slate.
             self.db.clear_all()?;
@@ -893,7 +937,12 @@ impl Actor {
         Ok(id)
     }
 
-    /// Why a message could not be encrypted for its recipient.
+    /// Records that a contact's key changed and puts it to the user.
+    ///
+    /// It also goes into the conversation itself, and stays there. The dialog
+    /// can be dismissed and forgotten; a line in the chat is still there
+    /// tomorrow, next to the messages that came before and after it, which is
+    /// where somebody would go looking if they later wondered.
     async fn dispute(&mut self, contact: &str, known: &str, published: &str) {
         if self
             .disputed
@@ -906,12 +955,34 @@ impl Actor {
             return;
         }
         tracing::warn!("the identity key of {contact} changed; waiting for the user to decide");
+
+        let at = now_ms();
+        let fingerprint = Engine::fingerprint(published);
+        // Local only: it is never sent, and its id is ours rather than the
+        // server's, so re-reading the conversation does not duplicate it.
+        let notice = StoredMessage {
+            id: format!("keychange-{contact}-{at}"),
+            contact: contact.to_string(),
+            mine: false,
+            kind: KEY_CHANGED.to_string(),
+            text: fingerprint.clone(),
+            state: "delivered".to_string(),
+            delivered_at: Some(at),
+            read_at: None,
+            created_at: at,
+        };
+        if let Err(e) = self.db.add_message(&notice) {
+            tracing::warn!("cannot record the key change of {contact}: {e}");
+        }
+
         if let Some(events) = &self.events {
             let _ = events
                 .send(ClientEvent::IdentityChanged {
+                    id: notice.id,
                     contact: contact.to_string(),
                     known: Engine::fingerprint(known),
-                    published: Engine::fingerprint(published),
+                    published: fingerprint,
+                    at,
                 })
                 .await;
         }
@@ -1385,6 +1456,7 @@ async fn report_fatal(mut commands: mpsc::Receiver<Command>, reason: String) {
             Command::ExportConversations { reply, .. } => drop(reply.send(Err(reason.clone()))),
             Command::ImportConversations { reply, .. } => drop(reply.send(Err(reason.clone()))),
             Command::AcceptIdentity { reply, .. } => drop(reply.send(Err(reason.clone()))),
+            Command::Logout { reply } => drop(reply.send(Err(reason.clone()))),
             Command::History { reply, .. } => drop(reply.send(Err(reason.clone()))),
             Command::MarkRead { reply, .. } => drop(reply.send(Err(reason.clone()))),
             Command::UpdateMe { reply, .. } => drop(reply.send(Err(reason.clone()))),
@@ -1474,6 +1546,14 @@ async fn actor(db_path: PathBuf, mut commands: mpsc::Receiver<Command>) {
                 }
                 Some(Command::AcceptIdentity { contact, reply }) => {
                     let result = actor.accept_identity(&contact.to_lowercase()).await;
+                    let _ = reply.send(result.map_err(|e| e.to_string()));
+                }
+                Some(Command::Logout { reply }) => {
+                    let result = actor.handle_logout().await;
+                    // The event stream belonged to the session that just
+                    // ended; leaving it open would keep pushing into a
+                    // conversation nobody is signed in to.
+                    stream = None;
                     let _ = reply.send(result.map_err(|e| e.to_string()));
                 }
                 Some(Command::Connect { reply }) => {

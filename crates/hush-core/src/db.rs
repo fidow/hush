@@ -463,6 +463,22 @@ impl LocalDb {
         })
     }
 
+    /// Which account this device belongs to, whether or not it holds a live
+    /// session. Signing out drops the token but not this: the conversations
+    /// stored here are that account's, and signing back in must find them
+    /// rather than start over.
+    pub fn account(&self) -> Result<Option<(String, String)>> {
+        Ok(match (self.meta_get("username")?, self.meta_get("server")?) {
+            (Some(username), Some(server)) => Some((username, server)),
+            _ => None,
+        })
+    }
+
+    /// Forgets the session token, which is what "signed out" means here.
+    pub fn forget_token(&self) -> Result<()> {
+        self.meta_delete("token")
+    }
+
     pub fn save_profile(&self, p: &Profile) -> Result<()> {
         self.meta_set("username", &p.username)?;
         self.meta_set("alias", &p.alias)?;

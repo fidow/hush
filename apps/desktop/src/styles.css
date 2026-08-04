@@ -829,6 +829,12 @@ button.secondary:hover {
   justify-content: flex-end;
 }
 
+/* Away from Save, at the other end: they are not two shades of the same
+   choice, and one of them ends the session. */
+#logout-btn {
+  margin-right: auto;
+}
+
 label.toggle {
   flex-direction: row;
   align-items: center;
@@ -868,6 +874,34 @@ label.toggle input {
 .info-list dd {
   text-align: right;
   user-select: text;
+}
+
+/* A note in the middle of the conversation that nobody wrote. Deliberately
+   not a bubble: it belongs to neither side. */
+.chat-notice {
+  align-self: center;
+  max-width: 90%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.25rem;
+  margin: 0.5rem 0;
+  padding: 0.5rem 0.9rem;
+  border: 1px solid var(--warn-border, var(--border));
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 0.8rem;
+  text-align: center;
+}
+
+.chat-notice code {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 0.82rem;
+  letter-spacing: 0.06em;
+  color: var(--text);
+  user-select: text;
+  overflow-wrap: anywhere;
 }
 
 .transfer-row {

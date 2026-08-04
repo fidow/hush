@@ -214,6 +214,14 @@ impl ApiClient {
         })
     }
 
+    /// Signs out: the server replaces the token with one nobody holds, so a
+    /// copy of it stops working rather than outliving the session.
+    pub async fn logout(&self) -> Result<()> {
+        let req = self.auth(self.http.post(format!("{}/v1/sessions/logout", self.base)))?;
+        Self::check(req.send().await.map_err(Self::conn_err)?).await?;
+        Ok(())
+    }
+
     /// Updates the caller's display name and/or presence.
     pub async fn update_me(&self, alias: Option<&str>, status: Option<&str>) -> Result<()> {
         let req = self.auth(self.http.patch(format!("{}/v1/me", self.base)))?;

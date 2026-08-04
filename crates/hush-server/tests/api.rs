@@ -136,6 +136,49 @@ async fn a_blocked_user_cannot_lift_their_own_block() {
     assert_eq!(res.status(), 403, "a blocked user must not get through");
 }
 
+/// Signing out has to kill the token, not merely be forgotten by the client:
+/// a token that still works afterwards is one that still works for whoever
+/// copied it.
+#[tokio::test]
+async fn signing_out_kills_the_token() {
+    let (base, pool) = spawn_server().await;
+    let client = reqwest::Client::new();
+    let alice = register(&client, &base, &pool, "alice", "Alicia").await;
+
+    let ok = client
+        .get(format!("{base}/v1/contacts"))
+        .bearer_auth(&alice)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), 200, "the token works before signing out");
+
+    let out = client
+        .post(format!("{base}/v1/sessions/logout"))
+        .bearer_auth(&alice)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(out.status(), 204);
+
+    let after = client
+        .get(format!("{base}/v1/contacts"))
+        .bearer_auth(&alice)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(after.status(), 401, "the old token must be dead");
+
+    // And the account is still there to sign back in to.
+    let again = client
+        .post(format!("{base}/v1/sessions"))
+        .json(&json!({ "username": "alice", "password": "supersecreta" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(again.status(), 200);
+}
+
 /// Key bundles are for people the account agreed to talk to. Each fetch spends
 /// one of its one-time prekeys, so an endpoint open to any signed-in stranger
 /// is one that lets a stranger exhaust them.

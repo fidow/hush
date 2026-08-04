@@ -155,6 +155,51 @@ async fn conversations_move_between_devices_through_an_export() {
     );
 }
 
+/// Signing out ends the session without taking the conversations with it.
+/// The server keeps no copy, so wiping them here would be destroying the only
+/// one there is — and signing back in has to find them again.
+#[tokio::test]
+async fn signing_out_keeps_the_conversations() {
+    use hush_core::HushClient;
+
+    let (base, pool) = spawn_server().await;
+    let dir = std::env::temp_dir().join(format!("hush-logout-{}", uuid::Uuid::new_v4()));
+
+    let bob = HushClient::spawn(dir.join("bob.db"));
+    bob.register(&base, "bob", "Roberto", "bob@example.com", "supersecreta")
+        .await
+        .unwrap();
+    bob.verify(&pending_code(&pool, "bob").await).await.unwrap();
+
+    let alice = HushClient::spawn(dir.join("alice.db"));
+    alice
+        .register(&base, "alice", "Alicia", "alice@example.com", "supersecreta")
+        .await
+        .unwrap();
+    alice.verify(&pending_code(&pool, "alice").await).await.unwrap();
+    alice.connect().await.unwrap();
+    bob.connect().await.unwrap();
+    alice.request_contact("bob").await.unwrap();
+    bob.accept_contact("alice").await.unwrap();
+    alice.send_text("bob", "antes de salir").await.unwrap();
+
+    alice.logout().await.unwrap();
+    assert!(
+        alice.load_profile().await.unwrap().is_none(),
+        "the app must come back to the sign-in screen"
+    );
+    assert!(
+        alice.send_text("bob", "ya no").await.is_err(),
+        "a signed-out client must not be able to write"
+    );
+
+    // Back in on the same device: the conversation is where it was left.
+    alice.login(&base, "alice", "supersecreta").await.unwrap();
+    let history = alice.history("bob").await.unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].text, "antes de salir");
+}
+
 /// Waits for `text` to show up in the conversation with `contact`.
 async fn wait_for_text(client: &hush_core::HushClient, contact: &str, text: &str) {
     let deadline = std::time::Instant::now() + Duration::from_secs(10);

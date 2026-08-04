@@ -458,11 +458,31 @@ async function selectContact(name: string) {
   $("#send-input").focus();
 }
 
+/// An entry nobody wrote: the note left when a contact's key changed.
+const KEY_CHANGED = "keychange";
+
 function renderMessages() {
   const container = $("#messages");
   container.replaceChildren();
   if (!current) return;
   for (const msg of contacts.get(current)?.messages ?? []) {
+    // Not a bubble and not anybody's: it sits across the conversation, where
+    // it happened, so the messages before and after it are the context.
+    if (msg.kind === KEY_CHANGED) {
+      const notice = document.createElement("div");
+      notice.className = "chat-notice";
+      notice.dataset.id = msg.id;
+      const line = document.createElement("span");
+      line.textContent = t("identity.chatNotice").replace(
+        "{name}",
+        contactLabel(current),
+      );
+      const code = document.createElement("code");
+      code.textContent = msg.text;
+      notice.append(line, code);
+      container.appendChild(notice);
+      continue;
+    }
     const div = document.createElement("div");
     div.className = `bubble ${msg.mine ? "mine" : "theirs"}`;
     div.dataset.id = msg.id;
@@ -1115,6 +1135,29 @@ $("#import-btn").addEventListener("click", async () => {
   );
 });
 
+// ---- Cerrar sesión ----
+
+$("#logout-btn").addEventListener("click", () => {
+  askConfirm(
+    t("logout.title"),
+    t("logout.note"),
+    t("logout.action"),
+    async () => {
+      try {
+        await invoke("logout");
+      } catch (e) {
+        // The session is gone locally either way; an unreachable server is
+        // not a reason to leave the user looking at a signed-in screen.
+        console.warn("logout", e);
+      }
+      // Reloading rather than unwinding by hand: the page holds timers,
+      // caches and a contact list that all belong to the session that just
+      // ended, and boot() starts clean.
+      location.reload();
+    },
+  );
+});
+
 // ---- La clave de un contacto ha cambiado ----
 
 /// The contact whose key is being questioned, while the dialog is up.
@@ -1442,9 +1485,22 @@ listen<{ id: string; sender: string; kind: string; text: string; created_at: num
 // A contact is publishing a key we never agreed to. Nothing more goes to
 // them, and nothing of theirs is read, until this is answered — so it is put
 // in front of the user rather than left in a corner.
-listen<{ contact: string; known: string; published: string }>(
+listen<{ id: string; contact: string; known: string; published: string; at: number }>(
   "hush://identity-changed",
   ({ payload }) => {
+    // Into the conversation as well as into a dialog. The dialog is answered
+    // and gone; the line stays where the messages around it are.
+    addMessage(payload.contact, {
+      id: payload.id,
+      sender: payload.contact,
+      kind: KEY_CHANGED,
+      text: payload.published,
+      created_at: payload.at,
+      state: "delivered",
+      delivered_at: payload.at,
+      read_at: null,
+      mine: false,
+    });
     askAboutIdentity(payload.contact, payload.known, payload.published);
   },
 );

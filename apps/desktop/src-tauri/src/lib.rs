@@ -181,6 +181,13 @@ async fn accept_identity(client: State<'_, HushClient>, contact: String) -> Resu
     client.accept_identity(&contact).await
 }
 
+/// Ends the session, here and on the server. The conversations on this device
+/// stay: nothing else holds a copy.
+#[tauri::command]
+async fn logout(client: State<'_, HushClient>) -> Result<(), String> {
+    client.logout().await
+}
+
 /// Opens the message stream; incoming messages arrive as `hush://message`
 /// events until disconnect (`hush://disconnected`).
 #[tauri::command]
@@ -253,16 +260,20 @@ async fn connect(
                 // more is sent to them until the user decides whether that
                 // was really them, so this has to reach the interface.
                 ClientEvent::IdentityChanged {
+                    id,
                     contact,
                     known,
                     published,
+                    at,
                 } => {
                     let _ = app.emit(
                         "hush://identity-changed",
                         serde_json::json!({
+                            "id": id,
                             "contact": contact,
                             "known": known,
                             "published": published,
+                            "at": at,
                         }),
                     );
                 }
@@ -590,6 +601,7 @@ pub fn run() {
             export_conversations,
             import_conversations,
             accept_identity,
+            logout,
             forgot_password,
             reset_password,
             idle_seconds,

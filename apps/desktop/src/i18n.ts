@@ -145,6 +145,12 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "identity.later": "Ahora no",
     "identity.accept": "Es esa persona",
     "identity.accepted": "Clave aceptada",
+    "identity.chatNotice": "La clave de cifrado de {name} ha cambiado:",
+
+    "logout.action": "Cerrar sesión",
+    "logout.title": "¿Cerrar sesión?",
+    "logout.note":
+      "Tus conversaciones se quedan en este dispositivo: el servidor no guarda copia. Si vas a dejar de usar este equipo, expórtalas antes.",
 
     "update.title": "Versión {version} disponible",
     "update.note": "Hay una versión nueva de Hush lista para instalar.",
@@ -414,6 +420,12 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     "identity.later": "Not now",
     "identity.accept": "It is really them",
     "identity.accepted": "Key accepted",
+    "identity.chatNotice": "{name}'s encryption key changed:",
+
+    "logout.action": "Sign out",
+    "logout.title": "Sign out?",
+    "logout.note":
+      "Your conversations stay on this device: the server keeps no copy. If you are done with this machine, export them first.",
 
     "update.title": "Version {version} available",
     "update.note": "A new version of Hush is ready to install.",

@@ -396,6 +396,7 @@ pub fn app(db: SqlitePool) -> Router {
         .route("/v1/accounts", post(register))
         .route("/v1/accounts/verify", post(verify_account))
         .route("/v1/sessions", post(login))
+        .route("/v1/sessions/logout", post(logout))
         .route("/v1/password/forgot", post(forgot_password))
         .route("/v1/password/reset", post(reset_password))
         .route("/v1/profile/{username}", get(get_profile))
@@ -1114,6 +1115,37 @@ async fn login(
 /// The lowest free device number for an account. Signal addresses a device
 /// with a single byte, so numbers are reused once a device is revoked rather
 /// than counting upwards forever.
+/// Signs the caller out.
+///
+/// The token is replaced with one nobody holds rather than merely forgotten by
+/// the client: a token that stays valid after the user asked to be signed out
+/// is a token that still works for whoever copied it. Keys and queue stay
+/// where they are, so signing back in resumes rather than starts over.
+async fn logout(auth: AuthUser, State(state): State<AppState>) -> Result<StatusCode, ApiError> {
+    let dead = new_token();
+    sqlx::query("UPDATE devices SET token = ? WHERE username = ? AND id = ?")
+        .bind(&dead)
+        .bind(&auth.username)
+        .bind(auth.device)
+        .execute(&state.db)
+        .await
+        .map_err(internal)?;
+    sqlx::query("UPDATE accounts SET token = ? WHERE username = ?")
+        .bind(&dead)
+        .bind(&auth.username)
+        .execute(&state.db)
+        .await
+        .map_err(internal)?;
+    state
+        .live
+        .lock()
+        .await
+        .remove(&(auth.username.clone(), auth.device));
+
+    tracing::info!(user = %auth.username, ip = %auth.ip, "signed out");
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// Records that the account's device was seen.
 async fn touch_device(db: &SqlitePool, username: &str, device: i64) {
     let _ = sqlx::query("UPDATE devices SET last_seen = ? WHERE username = ? AND id = ?")
