@@ -31,6 +31,12 @@ tauri-plugin-process = "2.3.1"
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+# Launching Hush again brings back the copy that is running. It has to be the
+# running copy that raises itself: ours usually sits hidden in the tray, and a
+# second process cannot reliably show somebody else's hidden window.
+tauri-plugin-single-instance = "2"
+
 [target.'cfg(windows)'.dependencies]
 # Toasts are sent directly so they carry Hush's own app id: the notification
 # plugin only registers it for an installed build.

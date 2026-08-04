@@ -50,27 +50,8 @@ pub fn acquire(data_dir: &Path, profile: &str) -> Option<ProfileLock> {
     }
 }
 
-/// Brings the copy that is already running to the front, so a second launch
-/// looks like clicking the app rather than doing nothing.
-#[cfg(windows)]
-pub fn raise_running_instance(window_title: &str) {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        FindWindowW, SetForegroundWindow, ShowWindow, SW_RESTORE,
-    };
-
-    let title: Vec<u16> = window_title
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
-    // SAFETY: the string is nul-terminated and outlives the call.
-    unsafe {
-        let handle = FindWindowW(std::ptr::null(), title.as_ptr());
-        if !handle.is_null() {
-            ShowWindow(handle, SW_RESTORE);
-            SetForegroundWindow(handle);
-        }
-    }
-}
-
-#[cfg(not(windows))]
-pub fn raise_running_instance(_window_title: &str) {}
+// Raising the copy that is already running used to live here: the second
+// process looked its window up by title and called SetForegroundWindow. It
+// does not work, and could not — Hush usually sits hidden in the tray, and a
+// hidden window is not something another process gets to show. The running
+// copy raises itself now, from the single-instance callback in `lib.rs`.

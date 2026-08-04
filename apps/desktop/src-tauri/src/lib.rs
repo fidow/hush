@@ -515,9 +515,38 @@ fn show_main_window(app: &tauri::AppHandle) {
     }
 }
 
+/// Whether this copy is running under a profile of its own.
+///
+/// `HUSH_PROFILE` exists so several copies can be run side by side while
+/// testing, each with its own database; the single-instance lock is per
+/// application, so it is only applied to the ordinary case.
+#[cfg(desktop)]
+fn has_own_profile() -> bool {
+    std::env::var("HUSH_PROFILE").is_ok_and(|p| !p.is_empty())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    #[allow(unused_mut)]
+    let mut builder = tauri::Builder::default();
+
+    // Before every other plugin, as the plugin requires. Launching Hush when
+    // it is already running should bring back the copy that is there — and
+    // that copy is usually hidden in the tray, so it has to be the one that
+    // shows itself. A second process trying to find and raise somebody else's
+    // hidden window is what used to happen, and what used to fail.
+    #[cfg(desktop)]
+    if !has_own_profile() {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }));
+    }
+
+    builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -538,7 +567,10 @@ pub fn run() {
 
             // Two copies of the same profile share a database and a set of
             // ratchet sessions, and would end up unable to read each other's
-            // conversations. The second one hands the screen to the first.
+            // conversations. The ordinary case is handled by the plugin above,
+            // which hands the screen back to the copy already running; this
+            // lock is what stops a second copy of a *named* profile, where
+            // there is nothing to hand the screen to.
             #[cfg(desktop)]
             {
                 match single_instance::acquire(&dir, &profile) {
@@ -547,7 +579,6 @@ pub fn run() {
                     }
                     None => {
                         tracing_note("another copy of this profile is already running");
-                        single_instance::raise_running_instance("Hush");
                         app.handle().exit(0);
                         return Ok(());
                     }
