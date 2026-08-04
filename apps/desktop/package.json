@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "check": "node scripts/check-i18n.mjs && node scripts/check-format.mjs",
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:build": "tauri build && node scripts/bump-version.mjs"

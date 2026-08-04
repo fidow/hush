@@ -7,6 +7,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { readFile, writeFile } from "@tauri-apps/plugin-fs";
 import { CATEGORIES, MAX_RECENT, RECENT_KEY } from "./emoji";
+import { plainText, renderMessage } from "./format";
 import { applyTranslations, LANGUAGES, lang, setLang, t, tError, type Lang } from "./i18n";
 import { offerUpdate } from "./updates";
 import {
@@ -424,7 +425,7 @@ async function selectContact(name: string) {
   });
   updateHeader();
   updateConversationPane();
-  ($("#send-input") as HTMLInputElement).disabled = false;
+  ($("#send-input") as HTMLTextAreaElement).disabled = false;
   ($("#send-btn") as HTMLButtonElement).disabled = false;
   ($("#emoji-btn") as HTMLButtonElement).disabled = false;
 
@@ -494,7 +495,8 @@ function renderMessages() {
       div.classList.add("image");
       div.appendChild(img);
     } else {
-      div.textContent = msg.text;
+      // Elements, never markup: the text was written by somebody else.
+      div.appendChild(renderMessage(msg.text));
     }
     // Time, and for our own messages the delivery ticks beside it: one for
     // sent, two for delivered, blue two for read.
@@ -1432,13 +1434,37 @@ $("#add-contact-form").addEventListener("submit", async (e) => {
   }
 });
 
+/// Grows the box with what is being typed, up to a point, then scrolls.
+function fitSendBox() {
+  const input = $("#send-input") as HTMLTextAreaElement;
+  input.style.height = "auto";
+  input.style.height = `${Math.min(input.scrollHeight, SEND_BOX_MAX_PX)}px`;
+}
+
+const SEND_BOX_MAX_PX = 160;
+
+$("#send-input").addEventListener("input", fitSendBox);
+
+// Enter sends and Shift+Enter breaks the line, as on a desktop chat. On a
+// phone there is no shift to hold, so Enter is a line break and the button is
+// how a message goes — which is what every phone keyboard already suggests.
+$("#send-input").addEventListener("keydown", (e) => {
+  const key = e as KeyboardEvent;
+  if (key.key !== "Enter" || key.isComposing) return;
+  if (IS_MOBILE || key.shiftKey) return;
+  key.preventDefault();
+  $("#send-form").dispatchEvent(new Event("submit", { cancelable: true }));
+});
+
 $("#send-form").addEventListener("submit", async (e) => {
   e.preventDefault();
-  const input = $("#send-input") as HTMLInputElement;
-  const text = input.value.trim();
+  const input = $("#send-input") as HTMLTextAreaElement;
+  // Only the ends: a blank line between two paragraphs is the person's.
+  const text = input.value.replace(/^\s+|\s+$/g, "");
   if (!text || !current) return;
   const recipient = current;
   input.value = "";
+  fitSendBox();
   hideEmojiPanel();
   try {
     const stored = await invoke<StoredMessage>("send_message", { recipient, text });
@@ -1475,8 +1501,12 @@ listen<{ id: string; sender: string; kind: string; text: string; created_at: num
       reportRead(payload.sender);
     } else {
       const who = contactLabel(payload.sender);
+      // Without the markers: a notification is one line of text, and
+      // "*hola*" reads worse than "hola".
       const preview =
-        payload.kind === "image" ? t("notify.image") : payload.text.slice(0, 120);
+        payload.kind === "image"
+          ? t("notify.image")
+          : plainText(payload.text).slice(0, 120);
       void alertUser(who, preview);
     }
   },
@@ -1617,7 +1647,7 @@ function pushRecent(emoji: string) {
 let activeCategory = 0; // -1 = recientes
 
 function insertEmoji(emoji: string) {
-  const input = $("#send-input") as HTMLInputElement;
+  const input = $("#send-input") as HTMLTextAreaElement;
   const start = input.selectionStart ?? input.value.length;
   const end = input.selectionEnd ?? input.value.length;
   input.value = input.value.slice(0, start) + emoji + input.value.slice(end);
