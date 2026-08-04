@@ -398,6 +398,12 @@ button:disabled {
   width: 24rem;
 }
 
+/* Las notas de una actualización llegan como varias líneas, y HTML se las
+   comería si no se le dice que las respete. */
+#confirm-note {
+  white-space: pre-wrap;
+}
+
 .confirm-actions {
   display: flex;
   gap: 0.6rem;
